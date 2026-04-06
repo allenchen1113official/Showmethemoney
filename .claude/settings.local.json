@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh auth:*)",
+      "Bash(git -C /Users/allenchen/Library/CloudStorage/GoogleDrive-allenchen1113.official@gmail.com/我的雲端硬碟/Showmethemoney status)",
+      "Bash(brew list:*)",
+      "Bash(git --version)",
+      "Read(//opt/homebrew/bin/**)",
+      "Read(//usr/local/bin/**)",
+      "Bash(brew install:*)",
+      "Bash(echo \"PATH: $PATH\")",
+      "Bash(/opt/homebrew/bin/brew install:*)",
+      "Read(//usr/**)",
+      "Read(//opt/**)",
+      "Read(//usr/local/Homebrew/bin/**)",
+      "Bash(/usr/local/bin/brew install:*)",
+      "Bash(/usr/local/bin/gh auth:*)",
+      "Bash(security find-internet-password:*)",
+      "Read(//Users/allenchen/.ssh/**)",
+      "Bash(ssh -T git@github.com)",
+      "Bash(git config:*)",
+      "Bash(chmod +x \"/Users/allenchen/Library/CloudStorage/GoogleDrive-allenchen1113.official@gmail.com/我的雲端硬碟/Showmethemoney/deploy.sh\")",
+      "Bash(git -C \"/Users/allenchen/Library/CloudStorage/GoogleDrive-allenchen1113.official@gmail.com/我的雲端硬碟/Showmethemoney\" add deploy.sh)",
+      "Bash(git -C \"/Users/allenchen/Library/CloudStorage/GoogleDrive-allenchen1113.official@gmail.com/我的雲端硬碟/Showmethemoney\" commit -m \"Add deploy script:*)"
+    ]
+  }
+}

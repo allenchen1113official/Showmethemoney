@@ -489,7 +489,7 @@
       <div class="clock-time" id="clkTime">--:--:--</div>
       <div class="clock-date" id="clkDate">----/--/--</div>
     </div>
-    <button class="btn-icon" id="refreshBtn" onclick="refreshAll()">
+    <button class="btn-icon" id="refreshBtn">
       <i class="fa-solid fa-rotate-right"></i> 更新
     </button>
   </div>
@@ -545,7 +545,7 @@
     <div class="card">
       <div class="card-hd">
         <div class="card-title"><i class="fa-solid fa-briefcase"></i> 自選股（10組）</div>
-        <button class="btn-icon" onclick="openModal()">
+        <button class="btn-icon" id="btnOpenModal" onclick="openModal()">
           <i class="fa-solid fa-pen"></i> 編輯
         </button>
       </div>
@@ -601,13 +601,13 @@
 
 <footer class="footer">
   <i class="fa-solid fa-circle-info"></i> 資料來源：Yahoo Finance、PTT Stock、Reddit | 每60秒自動更新 |
-  <a href="https://github.com/allenchen1113official/Showmethemonty" target="_blank">
+  <a href="https://github.com/allenchen1113official/Showmethemoney" target="_blank">
     <i class="fab fa-github"></i> GitHub
   </a>
 </footer>
 
 <!-- ===== MODAL ===== -->
-<div id="overlay" class="overlay" onclick="handleOverlayClick(event)">
+<div id="overlay" class="overlay" onclick="if(event.target===this)closeModal()">
   <div class="modal">
     <div class="modal-hd">
       <span><i class="fa-solid fa-pen-to-square"></i> 編輯自選股</span>
@@ -652,6 +652,7 @@ let refreshTimer = null;
 function init() {
   loadPortfolio();
   startClock();
+  bindModalEvents();
   refreshAll();
   refreshTimer = setInterval(refreshAll, CFG.refreshMs);
 }
@@ -863,7 +864,7 @@ async function fetchPortfolio() {
 
   el.innerHTML = portfolio.map((stock, i) => {
     if (!stock) return `
-      <div class="stock-card" onclick="openModal()" title="點擊新增">
+      <div class="stock-card js-open-modal" title="點擊新增">
         <div class="s-code" style="color:var(--text3)">${i+1}. 未設定</div>
         <div class="s-name" style="font-size:.65rem;color:var(--text3)">點擊新增</div>
         <div class="s-price neu" style="font-size:1.2rem;margin-top:.4rem">+</div>
@@ -941,7 +942,7 @@ async function fetchPortNews() {
 // ==================== REDDIT ====================
 async function fetchReddit() {
   const el = id('redditContent');
-  const subs = ['stocks', 'investing', 'wallstreetbets'];
+  const subs = ['Stocks', 'investing', 'wallstreetbets'];
   const allPosts = [];
 
   const jobs = subs.map(async sub => {
@@ -986,67 +987,58 @@ async function fetchReddit() {
 // ==================== PTT ====================
 async function fetchPTT() {
   const el = id('pttContent');
-  const urls = [
-    'https://www.ptt.cc/bbs/Stock/index.html',
-    'https://www.pttweb.cc/bbs/Stock',
-  ];
+  const RSS_URL = 'http://rss.ptt.cc/Stock.xml';
 
-  for (const rawUrl of urls) {
-    try {
-      const r = await proxyFetch(rawUrl);
-      const html = await r.text();
+  try {
+    const r = await proxyFetch(RSS_URL);
+    const text = await r.text();
 
-      if (html.includes('age-limit') || html.includes('over18') ||
-          html.includes('請您確認您已滿18歲')) continue; // skip age gate
+    // Parse as text/xml for better namespace support
+    const xml = new DOMParser().parseFromString(text, 'text/xml');
+    const parseErr = xml.querySelector('parsererror');
+    if (parseErr) throw new Error('XML parse error');
 
-      const doc = new DOMParser().parseFromString(html, 'text/html');
-      const rows = doc.querySelectorAll('.r-ent');
-      if (!rows.length) continue;
+    const items = xml.getElementsByTagName('item');
+    if (!items.length) throw new Error('No items in RSS');
 
-      const posts = [];
-      rows.forEach(row => {
-        const a = row.querySelector('.title a');
-        const score = row.querySelector('.nrec span');
-        const author = row.querySelector('.meta .author');
-        const date = row.querySelector('.meta .date');
-        if (a) {
-          const href = a.getAttribute('href') || '';
-          posts.push({
-            title: a.textContent.trim(),
-            url: href.startsWith('http') ? href : 'https://www.ptt.cc' + href,
-            score: score?.textContent.trim() || '0',
-            author: author?.textContent.trim() || '',
-            date: date?.textContent.trim() || '',
-          });
-        }
-      });
+    const posts = Array.from(items).slice(0, 10).map(item => {
+      // In RSS 2.0, <link> text content is the URL
+      const url = item.getElementsByTagName('link')[0]?.textContent?.trim()
+               || item.getElementsByTagName('guid')[0]?.textContent?.trim()
+               || '';
+      // dc:creator namespace
+      const creatorEl = item.getElementsByTagNameNS('*', 'creator')[0];
+      const author = creatorEl?.textContent?.trim()
+                  || item.getElementsByTagName('author')[0]?.textContent?.trim()
+                  || '';
+      return {
+        title:   item.getElementsByTagName('title')[0]?.textContent?.trim() || '',
+        url,
+        author,
+        pubDate: item.getElementsByTagName('pubDate')[0]?.textContent?.trim() || '',
+      };
+    });
 
-      if (!posts.length) continue;
-
-      el.innerHTML = posts.slice(-10).reverse().map(p => {
-        const sc = parseInt(p.score) || 0;
-        const cls = sc > 0 ? 'up' : sc < 0 ? 'down' : 'neu';
-        return `
-          <div class="ptt-item">
-            <a href="${p.url}" target="_blank" rel="noopener">
-              <div class="ptt-title">${esc(p.title)}</div>
-            </a>
-            <div class="ptt-meta">
-              <span class="ptt-push ${cls}"><i class="fa-solid fa-thumbs-up"></i> ${esc(p.score)}</span>
-              <span class="ptt-author">${esc(p.author)}</span>
-              <span class="ntime">${esc(p.date)}</span>
-            </div>
-          </div>`;
-      }).join('');
-      return;
-    } catch (_) {}
+    el.innerHTML = posts.map(p => {
+      const ts = p.pubDate ? ago(new Date(p.pubDate).getTime()) : '';
+      return `
+        <div class="ptt-item">
+          <a href="${p.url || 'https://www.ptt.cc/bbs/Stock/'}" target="_blank" rel="noopener">
+            <div class="ptt-title">${esc(p.title)}</div>
+          </a>
+          <div class="ptt-meta">
+            <span class="ptt-author"><i class="fa-regular fa-user"></i> ${esc(p.author)}</span>
+            <span class="ntime">${ts}</span>
+          </div>
+        </div>`;
+    }).join('');
+  } catch (e) {
+    console.warn('[PTT]', e);
+    el.innerHTML = `<div class="err">
+      <i class="fa-solid fa-triangle-exclamation"></i> PTT RSS 暫無法載入<br>
+      <a href="https://www.ptt.cc/bbs/Stock/index.html" target="_blank">前往 PTT Stock板</a>
+    </div>`;
   }
-
-  // All failed
-  el.innerHTML = `<div class="err">
-    <i class="fa-solid fa-triangle-exclamation"></i> PTT資料暫無法載入<br>
-    <a href="https://www.ptt.cc/bbs/Stock/index.html" target="_blank">前往 PTT Stock板</a>
-  </div>`;
 }
 
 // ==================== FINANCE NEWS ====================
@@ -1109,10 +1101,6 @@ function closeModal() {
   id('overlay').classList.remove('show');
 }
 
-function handleOverlayClick(e) {
-  if (e.target === id('overlay')) closeModal();
-}
-
 function savePortfolio() {
   portfolio = Array.from(document.querySelectorAll('.port-input'))
     .map(inp => inp.value.trim().toUpperCase());
@@ -1120,6 +1108,21 @@ function savePortfolio() {
   closeModal();
   fetchPortfolio();
   fetchPortNews();
+}
+
+function bindModalEvents() {
+  id('btnOpenModal').addEventListener('click', openModal);
+  id('btnModalClose').addEventListener('click', closeModal);
+  id('btnModalCancel').addEventListener('click', closeModal);
+  id('btnModalSave').addEventListener('click', savePortfolio);
+  id('overlay').addEventListener('click', e => {
+    if (e.target === id('overlay')) closeModal();
+  });
+  id('refreshBtn').addEventListener('click', refreshAll);
+  // 空白股票格點擊（動態元素用 event delegation）
+  id('portGrid').addEventListener('click', e => {
+    if (e.target.closest('.js-open-modal')) openModal();
+  });
 }
 
 // ==================== TABS ====================

@@ -6,7 +6,7 @@
 
 set -e
 
-REPO_NAME="Showmethemonty"
+REPO_NAME="Showmethemoney"
 GITHUB_USER="allenchen1113official"
 
 echo "🚀 開始部署 $REPO_NAME 到 GitHub Pages..."
