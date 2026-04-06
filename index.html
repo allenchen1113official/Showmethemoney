@@ -1,0 +1,1195 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Show Me The Money - 台股看盤系統，即時股價、景氣燈號、財經新聞">
+  <title>💰 Show Me The Money - 台股看盤</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" crossorigin="anonymous">
+  <style>
+    :root {
+      --bg: #0d1117;
+      --bg2: #161b22;
+      --bg3: #1c2128;
+      --border: #30363d;
+      --text: #e6edf3;
+      --text2: #8b949e;
+      --text3: #656d76;
+      --blue: #388bfd;
+      --up: #3fb950;
+      --down: #f85149;
+      --warn: #d29922;
+      --card-radius: 10px;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Noto Sans TC', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      min-height: 100vh;
+    }
+
+    /* ===== HEADER ===== */
+    header {
+      background: linear-gradient(135deg, #1a1f2e 0%, #0d1117 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 0.65rem 1.25rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      gap: 0.75rem;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 0.65rem;
+      flex-shrink: 0;
+    }
+    .logo-icon { font-size: 1.75rem; }
+    .logo h1 {
+      font-size: 1.15rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #ffd700, #ff8c00);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      line-height: 1.2;
+    }
+    .logo .sub { font-size: 0.68rem; color: var(--text2); }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .badge {
+      font-size: 0.72rem;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .badge-open { background: rgba(63,185,80,.15); color: var(--up); border: 1px solid rgba(63,185,80,.4); }
+    .badge-closed { background: rgba(139,148,158,.1); color: var(--text2); border: 1px solid rgba(139,148,158,.3); }
+
+    .clock { text-align: right; }
+    .clock-time {
+      font-size: 1.15rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      color: var(--blue);
+    }
+    .clock-date { font-size: 0.65rem; color: var(--text2); }
+
+    .btn-icon {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--text2);
+      padding: 0.3rem 0.65rem;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.78rem;
+      transition: all .2s;
+      white-space: nowrap;
+    }
+    .btn-icon:hover { border-color: var(--blue); color: var(--blue); }
+    .btn-icon.spinning i { animation: spin 1s linear infinite; }
+
+    /* ===== MAIN GRID ===== */
+    .main {
+      max-width: 1900px;
+      margin: 0 auto;
+      padding: 0.9rem;
+      display: grid;
+      grid-template-columns: 270px 1fr 330px;
+      gap: 0.9rem;
+      align-items: start;
+    }
+
+    /* ===== CARD ===== */
+    .card {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: var(--card-radius);
+      overflow: hidden;
+      margin-bottom: 0.9rem;
+    }
+    .card:last-child { margin-bottom: 0; }
+
+    .card-hd {
+      padding: 0.6rem 0.9rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(255,255,255,.02);
+    }
+    .card-title {
+      font-size: 0.82rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+    }
+    .card-title i { color: var(--blue); }
+    .card-bd { padding: 0.75rem 0.9rem; }
+
+    .ts { font-size: 0.65rem; color: var(--text3); }
+
+    /* ===== TRAFFIC LIGHT ===== */
+    .tl-wrap {
+      display: flex;
+      align-items: center;
+      gap: 0.9rem;
+      padding: 0.3rem 0;
+    }
+    .tl-bulb {
+      width: 60px;
+      height: 60px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.6rem;
+      flex-shrink: 0;
+      border: 2px solid rgba(255,255,255,.08);
+    }
+    .tl-label { font-size: 1rem; font-weight: 700; }
+    .tl-sub { font-size: 0.75rem; color: var(--text2); margin-top: 0.15rem; }
+    .tl-date { font-size: 0.65rem; color: var(--text3); margin-top: 0.1rem; }
+    .tl-link {
+      display: block;
+      text-align: center;
+      font-size: 0.68rem;
+      color: var(--blue);
+      text-decoration: none;
+      margin-top: 0.4rem;
+      padding-top: 0.4rem;
+      border-top: 1px solid var(--border);
+    }
+    .tl-link:hover { text-decoration: underline; }
+
+    /* ===== MARKET ITEMS ===== */
+    .mkt-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.55rem 0;
+      border-bottom: 1px solid rgba(255,255,255,.04);
+    }
+    .mkt-item:last-child { border-bottom: none; }
+    .mkt-left { display: flex; align-items: center; gap: 0.55rem; }
+    .mkt-flag { font-size: 1.2rem; }
+    .mkt-name { font-size: 0.8rem; font-weight: 600; }
+    .mkt-sub { font-size: 0.65rem; color: var(--text2); }
+    .mkt-right { text-align: right; }
+    .mkt-price { font-size: 0.88rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .mkt-chg { font-size: 0.7rem; font-variant-numeric: tabular-nums; }
+
+    .up { color: var(--up); }
+    .down { color: var(--down); }
+    .neu { color: var(--text2); }
+
+    /* ===== PORTFOLIO GRID ===== */
+    .port-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.55rem;
+      padding: 0.75rem 0.9rem;
+    }
+    .stock-card {
+      background: rgba(255,255,255,.025);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border);
+      border-radius: 7px;
+      padding: 0.65rem 0.7rem;
+      cursor: pointer;
+      transition: all .2s;
+      min-width: 0;
+    }
+    .stock-card:hover { border-color: var(--blue); background: rgba(56,139,253,.05); }
+    .stock-card.up-card { border-left-color: var(--up); }
+    .stock-card.down-card { border-left-color: var(--down); }
+    .s-code { font-size: 0.78rem; font-weight: 700; color: var(--blue); }
+    .s-name { font-size: 0.67rem; color: var(--text2); margin-top: 0.1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .s-price { font-size: 1.05rem; font-weight: 700; margin-top: 0.35rem; font-variant-numeric: tabular-nums; }
+    .s-chg { font-size: 0.72rem; font-variant-numeric: tabular-nums; }
+    .s-vol { font-size: 0.62rem; color: var(--text3); margin-top: 0.15rem; }
+
+    /* ===== NEWS ITEMS ===== */
+    .news-item {
+      padding: 0.6rem 0;
+      border-bottom: 1px solid rgba(255,255,255,.04);
+    }
+    .news-item:last-child { border-bottom: none; }
+    .news-item a { text-decoration: none; color: inherit; }
+    .news-title {
+      font-size: 0.78rem;
+      line-height: 1.4;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      transition: color .2s;
+    }
+    .news-item:hover .news-title { color: var(--blue); }
+    .news-meta { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.25rem; flex-wrap: wrap; }
+    .news-rank { font-size: 0.7rem; font-weight: 700; color: var(--text3); width: 1.3rem; flex-shrink: 0; }
+    .news-rank.gold { color: #ffd700; }
+    .news-rank.silver { color: #c0c0c0; }
+    .news-rank.bronze { color: #cd7f32; }
+    .tag { font-size: 0.62rem; padding: 0.1rem 0.3rem; border-radius: 3px; }
+    .tag-src { background: rgba(255,255,255,.06); color: var(--text3); }
+    .tag-ticker { background: rgba(56,139,253,.12); color: var(--blue); font-weight: 600; }
+    .tag-reddit { background: rgba(255,99,20,.12); color: #ff6314; }
+    .ntime { font-size: 0.62rem; color: var(--text3); }
+
+    /* ===== PTT ITEMS ===== */
+    .ptt-item {
+      padding: 0.55rem 0;
+      border-bottom: 1px solid rgba(255,255,255,.04);
+    }
+    .ptt-item:last-child { border-bottom: none; }
+    .ptt-item a { text-decoration: none; color: inherit; }
+    .ptt-title { font-size: 0.78rem; line-height: 1.4; transition: color .2s; }
+    .ptt-item:hover .ptt-title { color: var(--blue); }
+    .ptt-meta { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.2rem; }
+    .ptt-push { font-size: 0.68rem; font-weight: 600; }
+    .ptt-author { font-size: 0.62rem; color: var(--text3); }
+
+    /* ===== REDDIT ITEMS ===== */
+    .reddit-item {
+      padding: 0.55rem 0;
+      border-bottom: 1px solid rgba(255,255,255,.04);
+    }
+    .reddit-item:last-child { border-bottom: none; }
+    .reddit-item a { text-decoration: none; color: inherit; }
+    .reddit-title {
+      font-size: 0.78rem;
+      line-height: 1.4;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      transition: color .2s;
+    }
+    .reddit-item:hover .reddit-title { color: var(--blue); }
+    .reddit-meta { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.2rem; flex-wrap: wrap; }
+    .r-ups { font-size: 0.65rem; color: #ff6314; }
+    .r-cmt { font-size: 0.62rem; color: var(--text3); }
+
+    /* ===== TABS ===== */
+    .tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255,255,255,.015);
+    }
+    .tab {
+      padding: 0.5rem 0.8rem;
+      font-size: 0.75rem;
+      cursor: pointer;
+      color: var(--text2);
+      border-bottom: 2px solid transparent;
+      transition: all .2s;
+      white-space: nowrap;
+    }
+    .tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+    .tab:hover { color: var(--text); }
+
+    .tab-pane { display: none; padding: 0.75rem 0.9rem; }
+    .tab-pane.active { display: block; }
+
+    /* ===== PORTFOLIO NEWS ===== */
+    .pn-item {
+      padding: 0.5rem 0;
+      border-bottom: 1px solid rgba(255,255,255,.04);
+    }
+    .pn-item:last-child { border-bottom: none; }
+    .pn-item a { text-decoration: none; color: inherit; }
+    .pn-title {
+      font-size: 0.76rem;
+      line-height: 1.4;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      transition: color .2s;
+    }
+    .pn-item:hover .pn-title { color: var(--blue); }
+    .pn-meta { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.2rem; }
+
+    /* ===== MODAL ===== */
+    .overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,.72);
+      z-index: 200;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+    }
+    .overlay.show { display: flex; }
+
+    .modal {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.4rem;
+      width: 100%;
+      max-width: 460px;
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+    .modal-hd {
+      font-size: 0.95rem;
+      font-weight: 700;
+      margin-bottom: 0.9rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .modal-close {
+      background: none;
+      border: none;
+      color: var(--text2);
+      cursor: pointer;
+      font-size: 1.1rem;
+      transition: color .2s;
+    }
+    .modal-close:hover { color: var(--text); }
+    .modal-hint { font-size: 0.72rem; color: var(--text2); margin-bottom: 0.9rem; }
+
+    .input-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.55rem;
+      margin-bottom: 1rem;
+    }
+    .input-item { display: flex; flex-direction: column; gap: 0.2rem; }
+    .input-item label { font-size: 0.7rem; color: var(--text2); }
+    .input-item input {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.38rem 0.55rem;
+      color: var(--text);
+      font-size: 0.82rem;
+      font-family: inherit;
+      transition: border-color .2s;
+    }
+    .input-item input:focus { outline: none; border-color: var(--blue); }
+
+    .modal-foot { display: flex; gap: 0.65rem; justify-content: flex-end; }
+    .btn-prim {
+      background: var(--blue);
+      border: none;
+      color: #fff;
+      padding: 0.45rem 1rem;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.82rem;
+      font-weight: 600;
+      font-family: inherit;
+      transition: opacity .2s;
+    }
+    .btn-prim:hover { opacity: .85; }
+    .btn-sec {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--text2);
+      padding: 0.45rem 1rem;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.82rem;
+      font-family: inherit;
+      transition: all .2s;
+    }
+    .btn-sec:hover { border-color: var(--text); color: var(--text); }
+
+    /* ===== STATES ===== */
+    .loading {
+      text-align: center;
+      color: var(--text3);
+      padding: 1rem;
+      font-size: 0.78rem;
+    }
+    .loading i { animation: spin 1s linear infinite; }
+    .err { text-align: center; color: var(--down); padding: 0.75rem; font-size: 0.75rem; }
+    .err a { color: var(--blue); }
+
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+    /* ===== SCROLLBAR ===== */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: var(--bg2); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    /* ===== FOOTER ===== */
+    .footer {
+      text-align: center;
+      padding: 0.9rem;
+      font-size: 0.65rem;
+      color: var(--text3);
+      border-top: 1px solid var(--border);
+      margin-top: 0.5rem;
+    }
+    .footer a { color: var(--blue); text-decoration: none; }
+
+    /* ===== RESPONSIVE ===== */
+    @media (max-width: 1300px) {
+      .main { grid-template-columns: 250px 1fr 300px; }
+    }
+    @media (max-width: 1050px) {
+      .main { grid-template-columns: 1fr 1fr; }
+      .right-col { grid-column: 1 / -1; }
+    }
+    @media (max-width: 720px) {
+      .main { grid-template-columns: 1fr; padding: 0.6rem; gap: 0; }
+      .right-col { grid-column: auto; }
+      .card { margin-bottom: 0.6rem; }
+      header { flex-wrap: wrap; }
+      .header-right { gap: 0.6rem; }
+      .clock-time { font-size: 1rem; }
+      .port-grid { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 420px) {
+      .port-grid { grid-template-columns: 1fr; }
+      .input-grid { grid-template-columns: 1fr; }
+      .logo h1 { font-size: 0.95rem; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ===== HEADER ===== -->
+<header>
+  <div class="logo">
+    <span class="logo-icon">💰</span>
+    <div>
+      <h1>Show Me The Money</h1>
+      <div class="sub">台股看盤系統</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <span id="mktBadge" class="badge badge-closed">
+      <i class="fa-solid fa-circle" style="font-size:.45em;margin-right:.3rem"></i>休市中
+    </span>
+    <div class="clock">
+      <div class="clock-time" id="clkTime">--:--:--</div>
+      <div class="clock-date" id="clkDate">----/--/--</div>
+    </div>
+    <button class="btn-icon" id="refreshBtn" onclick="refreshAll()">
+      <i class="fa-solid fa-rotate-right"></i> 更新
+    </button>
+  </div>
+</header>
+
+<!-- ===== MAIN ===== -->
+<div class="main">
+
+  <!-- ===== LEFT PANEL ===== -->
+  <div class="left-col">
+
+    <!-- 景氣燈號 -->
+    <div class="card">
+      <div class="card-hd">
+        <div class="card-title"><i class="fa-solid fa-traffic-light"></i> 景氣燈號</div>
+        <a href="https://index.ndc.gov.tw/" target="_blank" class="ts" style="color:var(--text3);text-decoration:none">
+          NDC <i class="fa-solid fa-arrow-up-right-from-square" style="font-size:.6rem"></i>
+        </a>
+      </div>
+      <div class="card-bd">
+        <div id="tlContent" class="loading"><i class="fa-solid fa-circle-notch"></i> 載入中...</div>
+      </div>
+    </div>
+
+    <!-- 台灣市場 -->
+    <div class="card">
+      <div class="card-hd">
+        <div class="card-title"><i class="fa-solid fa-chart-line"></i> 台灣市場</div>
+        <span class="ts" id="twTs"></span>
+      </div>
+      <div class="card-bd">
+        <div id="twMkt" class="loading"><i class="fa-solid fa-circle-notch"></i> 載入中...</div>
+      </div>
+    </div>
+
+    <!-- 國際股市 -->
+    <div class="card">
+      <div class="card-hd">
+        <div class="card-title"><i class="fa-solid fa-globe"></i> 國際股市</div>
+        <span class="ts" id="intlTs"></span>
+      </div>
+      <div class="card-bd">
+        <div id="intlMkt" class="loading"><i class="fa-solid fa-circle-notch"></i> 載入中...</div>
+      </div>
+    </div>
+
+  </div><!-- /left -->
+
+  <!-- ===== MIDDLE PANEL ===== -->
+  <div class="mid-col">
+
+    <!-- 自選股 -->
+    <div class="card">
+      <div class="card-hd">
+        <div class="card-title"><i class="fa-solid fa-briefcase"></i> 自選股（10組）</div>
+        <button class="btn-icon" onclick="openModal()">
+          <i class="fa-solid fa-pen"></i> 編輯
+        </button>
+      </div>
+      <div id="portGrid" class="port-grid">
+        <!-- rendered by JS -->
+      </div>
+    </div>
+
+    <!-- 自選股新聞 -->
+    <div class="card">
+      <div class="card-hd">
+        <div class="card-title"><i class="fa-solid fa-bolt"></i> 自選股即時新聞</div>
+        <span class="ts" id="pnTs"></span>
+      </div>
+      <div class="card-bd">
+        <div id="portNews" class="loading"><i class="fa-solid fa-circle-notch"></i> 載入中...</div>
+      </div>
+    </div>
+
+  </div><!-- /mid -->
+
+  <!-- ===== RIGHT PANEL ===== -->
+  <div class="right-col">
+    <div class="card" style="margin-bottom:0">
+      <div class="card-hd">
+        <div class="card-title"><i class="fa-solid fa-fire"></i> 財經熱門 Top 10</div>
+      </div>
+      <div class="tabs">
+        <div class="tab active" onclick="switchTab(this,'paneReddit')">
+          <i class="fab fa-reddit-alien"></i> Reddit
+        </div>
+        <div class="tab" onclick="switchTab(this,'panePTT')">
+          <i class="fa-solid fa-comments"></i> PTT
+        </div>
+        <div class="tab" onclick="switchTab(this,'paneFinance')">
+          <i class="fa-solid fa-newspaper"></i> 財經
+        </div>
+      </div>
+
+      <div id="paneReddit" class="tab-pane active">
+        <div id="redditContent" class="loading"><i class="fa-solid fa-circle-notch"></i> 載入中...</div>
+      </div>
+      <div id="panePTT" class="tab-pane">
+        <div id="pttContent" class="loading"><i class="fa-solid fa-circle-notch"></i> 載入中...</div>
+      </div>
+      <div id="paneFinance" class="tab-pane">
+        <div id="finContent" class="loading"><i class="fa-solid fa-circle-notch"></i> 載入中...</div>
+      </div>
+    </div>
+  </div><!-- /right -->
+
+</div><!-- /main -->
+
+<footer class="footer">
+  <i class="fa-solid fa-circle-info"></i> 資料來源：Yahoo Finance、PTT Stock、Reddit | 每60秒自動更新 |
+  <a href="https://github.com/allenchen1113official/Showmethemonty" target="_blank">
+    <i class="fab fa-github"></i> GitHub
+  </a>
+</footer>
+
+<!-- ===== MODAL ===== -->
+<div id="overlay" class="overlay" onclick="handleOverlayClick(event)">
+  <div class="modal">
+    <div class="modal-hd">
+      <span><i class="fa-solid fa-pen-to-square"></i> 編輯自選股</span>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <p class="modal-hint">輸入台股代碼（例：2330、6505），或留空不使用該欄位</p>
+    <div class="input-grid" id="inputGrid"><!-- rendered by JS --></div>
+    <div class="modal-foot">
+      <button class="btn-sec" onclick="closeModal()">取消</button>
+      <button class="btn-prim" onclick="savePortfolio()">
+        <i class="fa-solid fa-floppy-disk"></i> 儲存並更新
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+// ==================== CONFIG ====================
+const CFG = {
+  proxyA: 'https://api.allorigins.win/raw?url=',
+  proxyB: 'https://corsproxy.io/?url=',
+  yfQ7:   'https://query1.finance.yahoo.com/v7/finance/quote?symbols=',
+  yfSrc:  'https://query1.finance.yahoo.com/v1/finance/search?q=',
+  defaultPort: ['2330','2317','2454','2382','2412','6505','1301','2882','2308','3008'],
+  refreshMs: 60000,
+};
+
+const TL_MAP = {
+  red:       { label:'紅燈',   desc:'景氣過熱', color:'#ff4444', bg:'rgba(255,68,68,.18)',  icon:'🔴' },
+  yellowRed: { label:'黃紅燈', desc:'景氣偏熱', color:'#ff8c00', bg:'rgba(255,140,0,.18)', icon:'🟠' },
+  green:     { label:'綠燈',   desc:'景氣穩定', color:'#44bb44', bg:'rgba(68,187,68,.18)', icon:'🟢' },
+  yellowBlue:{ label:'黃藍燈', desc:'景氣偏冷', color:'#40e0d0', bg:'rgba(64,224,208,.18)',icon:'🔵' },
+  blue:      { label:'藍燈',   desc:'景氣衰退', color:'#4488ff', bg:'rgba(68,136,255,.18)',icon:'💙' },
+};
+
+let portfolio = [];
+let refreshTimer = null;
+
+// ==================== INIT ====================
+function init() {
+  loadPortfolio();
+  startClock();
+  refreshAll();
+  refreshTimer = setInterval(refreshAll, CFG.refreshMs);
+}
+
+function loadPortfolio() {
+  const s = localStorage.getItem('smtm_port');
+  portfolio = s ? JSON.parse(s) : [...CFG.defaultPort];
+  while (portfolio.length < 10) portfolio.push('');
+  portfolio = portfolio.slice(0, 10);
+}
+
+// ==================== CLOCK ====================
+function startClock() {
+  const tick = () => {
+    const n = new Date();
+    const el = id('clkTime');
+    const de = id('clkDate');
+    const be = id('mktBadge');
+    if (el) el.textContent = n.toLocaleTimeString('zh-TW', { hour12: false });
+    if (de) de.textContent = n.toLocaleDateString('zh-TW', {
+      year:'numeric', month:'2-digit', day:'2-digit', weekday:'short'
+    });
+    const day = n.getDay(), h = n.getHours(), m = n.getMinutes();
+    const open = day >= 1 && day <= 5 && (h > 9 || (h === 9 && m >= 0)) && (h < 13 || (h === 13 && m <= 30));
+    if (be) {
+      be.className = `badge ${open ? 'badge-open' : 'badge-closed'}`;
+      be.innerHTML = `<i class="fa-solid fa-circle" style="font-size:.45em;margin-right:.3rem"></i>${open ? '交易中' : '休市中'}`;
+    }
+  };
+  tick();
+  setInterval(tick, 1000);
+}
+
+// ==================== FETCH HELPERS ====================
+async function proxyFetch(url) {
+  // Try proxy A first, then proxy B
+  for (const px of [CFG.proxyA, CFG.proxyB]) {
+    try {
+      const r = await fetch(px + encodeURIComponent(url), { signal: AbortSignal.timeout(8000) });
+      if (r.ok) return r;
+    } catch (_) {}
+  }
+  throw new Error('All proxies failed for: ' + url);
+}
+
+async function yfQuotes(symbols) {
+  const valid = symbols.filter(Boolean);
+  if (!valid.length) return [];
+  const url = CFG.yfQ7 + valid.join(',') +
+    '&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,' +
+    'regularMarketVolume,regularMarketPreviousClose,shortName,regularMarketTime&lang=zh-TW';
+  try {
+    const r = await proxyFetch(url);
+    const t = await r.text();
+    const d = JSON.parse(t);
+    return d.quoteResponse?.result || [];
+  } catch (e) {
+    console.warn('[YF] quote fetch failed', e);
+    return [];
+  }
+}
+
+// ==================== TRAFFIC LIGHT ====================
+async function fetchTL() {
+  const el = id('tlContent');
+  try {
+    // Try NDC API (best-effort)
+    const r = await fetch('https://index.ndc.gov.tw/n/json/leading/zh-TW',
+      { signal: AbortSignal.timeout(6000) });
+    if (r.ok) {
+      const d = await r.json();
+      const arr = d.data || d;
+      if (Array.isArray(arr) && arr.length) {
+        const last = arr[arr.length - 1];
+        const score = last.score ?? last.综合判断分数 ?? last.總分;
+        const month = last.yearMonth || last.date || '';
+        if (score) { renderTL(el, score, month); return; }
+      }
+    }
+  } catch (_) {}
+
+  // Try via proxy
+  try {
+    const r2 = await proxyFetch('https://index.ndc.gov.tw/n/json/leading/zh-TW');
+    const t = await r2.text();
+    const d = JSON.parse(t);
+    const arr = d.data || d;
+    if (Array.isArray(arr) && arr.length) {
+      const last = arr[arr.length - 1];
+      const score = last.score ?? last.综合判断分数 ?? last.總分;
+      const month = last.yearMonth || last.date || '';
+      if (score) { renderTL(el, score, month); return; }
+    }
+  } catch (_) {}
+
+  // Static fallback
+  el.innerHTML = tlHTML('green', null, '請至NDC查看最新資料');
+}
+
+function renderTL(el, score, month) {
+  let type = 'green';
+  if (score >= 38) type = 'red';
+  else if (score >= 32) type = 'yellowRed';
+  else if (score >= 23) type = 'green';
+  else if (score >= 17) type = 'yellowBlue';
+  else type = 'blue';
+  el.innerHTML = tlHTML(type, score, month);
+}
+
+function tlHTML(type, score, month) {
+  const t = TL_MAP[type];
+  return `
+    <div class="tl-wrap">
+      <div class="tl-bulb" style="background:${t.bg};box-shadow:0 0 18px ${t.bg}">${t.icon}</div>
+      <div>
+        <div class="tl-label" style="color:${t.color}">${t.label}</div>
+        <div class="tl-sub">${t.desc}${score ? ` (${score}分)` : ''}</div>
+        <div class="tl-date">${month || '參考值'}</div>
+      </div>
+    </div>
+    <a href="https://index.ndc.gov.tw/" target="_blank" class="tl-link">
+      查看最新景氣燈號 <i class="fa-solid fa-arrow-up-right-from-square"></i>
+    </a>`;
+}
+
+// ==================== MARKET INDICES ====================
+async function fetchMarkets() {
+  const twSyms  = ['^TWII', 'FITX=F'];
+  const intSyms = ['^N225', '^KS11', '^DJI', '^GSPC', '^IXIC'];
+  const all = await yfQuotes([...twSyms, ...intSyms]);
+  const qm = Object.fromEntries(all.map(q => [q.symbol, q]));
+
+  renderTW(qm);
+  renderIntl(qm);
+}
+
+function mktItem(q, flag, name, sub) {
+  if (!q) return `
+    <div class="mkt-item">
+      <div class="mkt-left">
+        <span class="mkt-flag">${flag}</span>
+        <div><div class="mkt-name">${name}</div><div class="mkt-sub">${sub}</div></div>
+      </div>
+      <div class="mkt-right">
+        <div class="mkt-price neu">--</div>
+        <div class="mkt-chg neu">暫無資料</div>
+      </div>
+    </div>`;
+  const p = q.regularMarketPrice, ch = q.regularMarketChange, pct = q.regularMarketChangePercent;
+  const dir = ch > 0 ? 'up' : ch < 0 ? 'down' : 'neu';
+  const arr = ch > 0 ? '▲' : ch < 0 ? '▼' : '─';
+  return `
+    <div class="mkt-item">
+      <div class="mkt-left">
+        <span class="mkt-flag">${flag}</span>
+        <div><div class="mkt-name">${name}</div><div class="mkt-sub">${sub}</div></div>
+      </div>
+      <div class="mkt-right">
+        <div class="mkt-price ${dir}">${fmtN(p)}</div>
+        <div class="mkt-chg ${dir}">${arr} ${Math.abs(ch).toFixed(2)} (${pct > 0 ? '+' : ''}${pct.toFixed(2)}%)</div>
+      </div>
+    </div>`;
+}
+
+function renderTW(qm) {
+  const el = id('twMkt');
+  const taiex = qm['^TWII'], fut = qm['FITX=F'];
+  el.innerHTML =
+    mktItem(taiex, '🇹🇼', '台灣加權指數', 'TAIEX') +
+    mktItem(fut,   '📊',  '台指期貨近月', 'FITX');
+  id('twTs').textContent = taiex ? fmtTs(taiex.regularMarketTime * 1000) : '';
+}
+
+function renderIntl(qm) {
+  const el = id('intlMkt');
+  const items = [
+    { s:'^N225',  flag:'🇯🇵', name:'日經225',    sub:'Nikkei 225' },
+    { s:'^KS11',  flag:'🇰🇷', name:'韓國綜合',   sub:'KOSPI' },
+    { s:'^DJI',   flag:'🇺🇸', name:'道瓊工業',   sub:'Dow Jones' },
+    { s:'^GSPC',  flag:'🇺🇸', name:'標普 500',   sub:'S&P 500' },
+    { s:'^IXIC',  flag:'🇺🇸', name:'那斯達克',   sub:'NASDAQ' },
+  ];
+  el.innerHTML = items.map(i => mktItem(qm[i.s], i.flag, i.name, i.sub)).join('');
+  const ref = items.map(i => qm[i.s]).find(q => q?.regularMarketTime);
+  id('intlTs').textContent = ref ? fmtTs(ref.regularMarketTime * 1000) : '';
+}
+
+// ==================== PORTFOLIO ====================
+async function fetchPortfolio() {
+  const el = id('portGrid');
+  const valid = portfolio.filter(Boolean);
+  if (!valid.length) {
+    el.innerHTML = '<p style="grid-column:1/-1;text-align:center;color:var(--text3);padding:1.5rem;font-size:.78rem">點擊「編輯」新增自選股</p>';
+    return;
+  }
+
+  // Show skeleton
+  el.innerHTML = portfolio.map((s, i) => `
+    <div class="stock-card">
+      <div class="s-code">${s || (i+1)+'. 未設定'}</div>
+      <div class="s-name">...</div>
+      <div class="s-price neu" style="font-size:.9rem">載入中</div>
+    </div>`).join('');
+
+  const syms = valid.map(s => s + '.TW');
+  const quotes = await yfQuotes(syms);
+  const qm = {};
+  quotes.forEach(q => { qm[q.symbol.replace('.TW','').replace('.TWO','')] = q; });
+
+  el.innerHTML = portfolio.map((stock, i) => {
+    if (!stock) return `
+      <div class="stock-card" onclick="openModal()" title="點擊新增">
+        <div class="s-code" style="color:var(--text3)">${i+1}. 未設定</div>
+        <div class="s-name" style="font-size:.65rem;color:var(--text3)">點擊新增</div>
+        <div class="s-price neu" style="font-size:1.2rem;margin-top:.4rem">+</div>
+      </div>`;
+    const q = qm[stock];
+    if (!q) return `
+      <div class="stock-card">
+        <div class="s-code">${esc(stock)}</div>
+        <div class="s-name">查無資料</div>
+        <div class="s-price neu">--</div>
+      </div>`;
+    const ch = q.regularMarketChange, pct = q.regularMarketChangePercent;
+    const dir = ch > 0 ? 'up' : ch < 0 ? 'down' : 'neu';
+    const arr = ch > 0 ? '▲' : ch < 0 ? '▼' : '─';
+    const cls = ch > 0 ? 'up-card' : ch < 0 ? 'down-card' : '';
+    return `
+      <div class="stock-card ${cls}">
+        <div class="s-code">${esc(stock)}</div>
+        <div class="s-name" title="${esc(q.shortName||'')} ">${esc(q.shortName || stock)}</div>
+        <div class="s-price ${dir}">${fmtN(q.regularMarketPrice, 2)}</div>
+        <div class="s-chg ${dir}">${arr} ${Math.abs(ch).toFixed(2)} (${pct>0?'+':''}${pct.toFixed(2)}%)</div>
+        <div class="s-vol">量 ${fmtVol(q.regularMarketVolume)}</div>
+      </div>`;
+  }).join('');
+}
+
+// ==================== PORTFOLIO NEWS ====================
+async function fetchPortNews() {
+  const el = id('portNews');
+  const valid = portfolio.filter(Boolean).slice(0, 5);
+  if (!valid.length) {
+    el.innerHTML = '<p style="text-align:center;color:var(--text3);font-size:.78rem;padding:1rem">請先設定自選股</p>';
+    return;
+  }
+  el.innerHTML = '<div class="loading"><i class="fa-solid fa-circle-notch"></i> 載入新聞...</div>';
+
+  const allNews = [];
+  const jobs = valid.map(async s => {
+    try {
+      const r = await proxyFetch(CFG.yfSrc + encodeURIComponent(s + '.TW') + '&newsCount=4&lang=zh-TW');
+      const d = JSON.parse(await r.text());
+      return (d.news || []).map(n => ({ ...n, _ticker: s }));
+    } catch (_) { return []; }
+  });
+
+  const results = await Promise.allSettled(jobs);
+  results.forEach(r => { if (r.status === 'fulfilled') allNews.push(...r.value); });
+
+  if (!allNews.length) {
+    el.innerHTML = '<p class="err">暫無新聞資料</p>';
+    return;
+  }
+
+  const seen = new Set();
+  const items = allNews
+    .sort((a, b) => (b.providerPublishTime||0) - (a.providerPublishTime||0))
+    .filter(n => { if (seen.has(n.uuid)) return false; seen.add(n.uuid); return true; })
+    .slice(0, 16);
+
+  el.innerHTML = items.map(n => `
+    <div class="pn-item">
+      <a href="${n.link||'#'}" target="_blank" rel="noopener">
+        <div class="pn-title">${esc(n.title||'')}</div>
+      </a>
+      <div class="pn-meta">
+        <span class="tag tag-ticker">${esc(n._ticker)}</span>
+        <span class="ntime">${esc(n.publisher||'')}</span>
+        <span class="ntime">${n.providerPublishTime ? ago(n.providerPublishTime*1000) : ''}</span>
+      </div>
+    </div>`).join('');
+
+  id('pnTs').textContent = fmtTs(Date.now());
+}
+
+// ==================== REDDIT ====================
+async function fetchReddit() {
+  const el = id('redditContent');
+  const subs = ['stocks', 'investing', 'wallstreetbets'];
+  const allPosts = [];
+
+  const jobs = subs.map(async sub => {
+    try {
+      const r = await fetch(
+        `https://www.reddit.com/r/${sub}/hot.json?limit=6&raw_json=1`,
+        { signal: AbortSignal.timeout(8000) }
+      );
+      const d = await r.json();
+      return (d.data?.children || []).map(c => ({ ...c.data, _sub: sub }));
+    } catch (_) { return []; }
+  });
+
+  const res = await Promise.allSettled(jobs);
+  res.forEach(r => { if (r.status === 'fulfilled') allPosts.push(...r.value); });
+
+  if (!allPosts.length) {
+    el.innerHTML = `<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 載入失敗<br>
+      <a href="https://www.reddit.com/r/stocks/" target="_blank">前往 Reddit/stocks</a></div>`;
+    return;
+  }
+
+  const top = allPosts
+    .filter(p => !p.stickied && p.title)
+    .sort((a, b) => b.ups - a.ups)
+    .slice(0, 10);
+
+  el.innerHTML = top.map((p, i) => `
+    <div class="reddit-item">
+      <a href="https://reddit.com${p.permalink}" target="_blank" rel="noopener">
+        <div class="reddit-title">${esc(p.title)}</div>
+      </a>
+      <div class="reddit-meta">
+        <span class="r-ups"><i class="fa-solid fa-arrow-up"></i> ${fmtK(p.ups)}</span>
+        <span class="r-cmt"><i class="fa-solid fa-comment"></i> ${fmtK(p.num_comments)}</span>
+        <span class="tag tag-reddit">r/${p._sub}</span>
+        <span class="ntime">${ago(p.created_utc * 1000)}</span>
+      </div>
+    </div>`).join('');
+}
+
+// ==================== PTT ====================
+async function fetchPTT() {
+  const el = id('pttContent');
+  const urls = [
+    'https://www.ptt.cc/bbs/Stock/index.html',
+    'https://www.pttweb.cc/bbs/Stock',
+  ];
+
+  for (const rawUrl of urls) {
+    try {
+      const r = await proxyFetch(rawUrl);
+      const html = await r.text();
+
+      if (html.includes('age-limit') || html.includes('over18') ||
+          html.includes('請您確認您已滿18歲')) continue; // skip age gate
+
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const rows = doc.querySelectorAll('.r-ent');
+      if (!rows.length) continue;
+
+      const posts = [];
+      rows.forEach(row => {
+        const a = row.querySelector('.title a');
+        const score = row.querySelector('.nrec span');
+        const author = row.querySelector('.meta .author');
+        const date = row.querySelector('.meta .date');
+        if (a) {
+          const href = a.getAttribute('href') || '';
+          posts.push({
+            title: a.textContent.trim(),
+            url: href.startsWith('http') ? href : 'https://www.ptt.cc' + href,
+            score: score?.textContent.trim() || '0',
+            author: author?.textContent.trim() || '',
+            date: date?.textContent.trim() || '',
+          });
+        }
+      });
+
+      if (!posts.length) continue;
+
+      el.innerHTML = posts.slice(-10).reverse().map(p => {
+        const sc = parseInt(p.score) || 0;
+        const cls = sc > 0 ? 'up' : sc < 0 ? 'down' : 'neu';
+        return `
+          <div class="ptt-item">
+            <a href="${p.url}" target="_blank" rel="noopener">
+              <div class="ptt-title">${esc(p.title)}</div>
+            </a>
+            <div class="ptt-meta">
+              <span class="ptt-push ${cls}"><i class="fa-solid fa-thumbs-up"></i> ${esc(p.score)}</span>
+              <span class="ptt-author">${esc(p.author)}</span>
+              <span class="ntime">${esc(p.date)}</span>
+            </div>
+          </div>`;
+      }).join('');
+      return;
+    } catch (_) {}
+  }
+
+  // All failed
+  el.innerHTML = `<div class="err">
+    <i class="fa-solid fa-triangle-exclamation"></i> PTT資料暫無法載入<br>
+    <a href="https://www.ptt.cc/bbs/Stock/index.html" target="_blank">前往 PTT Stock板</a>
+  </div>`;
+}
+
+// ==================== FINANCE NEWS ====================
+async function fetchFinanceNews() {
+  const el = id('finContent');
+  const allNews = [];
+  const queries = ['台股', 'TAIEX', '台積電', '美股'];
+
+  const jobs = queries.slice(0, 3).map(async q => {
+    try {
+      const r = await proxyFetch(CFG.yfSrc + encodeURIComponent(q) + '&newsCount=5&lang=zh-TW');
+      const d = JSON.parse(await r.text());
+      return d.news || [];
+    } catch (_) { return []; }
+  });
+
+  const res = await Promise.allSettled(jobs);
+  res.forEach(r => { if (r.status === 'fulfilled') allNews.push(...r.value); });
+
+  if (!allNews.length) {
+    el.innerHTML = '<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 財經新聞載入失敗</div>';
+    return;
+  }
+
+  const seen = new Set();
+  const top = allNews
+    .sort((a, b) => (b.providerPublishTime||0) - (a.providerPublishTime||0))
+    .filter(n => { if (seen.has(n.uuid)) return false; seen.add(n.uuid); return true; })
+    .slice(0, 10);
+
+  el.innerHTML = top.map((n, i) => {
+    const rankCls = i === 0 ? 'gold' : i === 1 ? 'silver' : i === 2 ? 'bronze' : '';
+    return `
+      <div class="news-item">
+        <div style="display:flex;align-items:flex-start;gap:.4rem">
+          <span class="news-rank ${rankCls}">#${i+1}</span>
+          <a href="${n.link||'#'}" target="_blank" rel="noopener" style="flex:1">
+            <div class="news-title">${esc(n.title||'')}</div>
+          </a>
+        </div>
+        <div class="news-meta" style="padding-left:1.7rem">
+          <span class="tag tag-src">${esc(n.publisher||'')}</span>
+          <span class="ntime">${n.providerPublishTime ? ago(n.providerPublishTime*1000) : ''}</span>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+// ==================== PORTFOLIO MODAL ====================
+function openModal() {
+  id('inputGrid').innerHTML = portfolio.map((s, i) => `
+    <div class="input-item">
+      <label>股票 ${i+1}</label>
+      <input type="text" class="port-input" value="${esc(s||'')}" placeholder="如：2330" maxlength="6">
+    </div>`).join('');
+  id('overlay').classList.add('show');
+}
+
+function closeModal() {
+  id('overlay').classList.remove('show');
+}
+
+function handleOverlayClick(e) {
+  if (e.target === id('overlay')) closeModal();
+}
+
+function savePortfolio() {
+  portfolio = Array.from(document.querySelectorAll('.port-input'))
+    .map(inp => inp.value.trim().toUpperCase());
+  localStorage.setItem('smtm_port', JSON.stringify(portfolio));
+  closeModal();
+  fetchPortfolio();
+  fetchPortNews();
+}
+
+// ==================== TABS ====================
+function switchTab(tabEl, paneId) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+  tabEl.classList.add('active');
+  id(paneId).classList.add('active');
+}
+
+// ==================== REFRESH ====================
+async function refreshAll() {
+  const btn = id('refreshBtn');
+  if (btn) { btn.classList.add('spinning'); btn.disabled = true; }
+
+  await Promise.allSettled([
+    fetchTL(),
+    fetchMarkets(),
+    fetchPortfolio(),
+    fetchPortNews(),
+    fetchReddit(),
+    fetchPTT(),
+    fetchFinanceNews(),
+  ]);
+
+  if (btn) { btn.classList.remove('spinning'); btn.disabled = false; }
+}
+
+// ==================== UTILS ====================
+const id = s => document.getElementById(s);
+
+function fmtN(n, d = 2) {
+  if (n == null || isNaN(n)) return '--';
+  return n.toLocaleString('zh-TW', { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+
+function fmtVol(v) {
+  if (!v) return '--';
+  if (v >= 1e8) return (v / 1e8).toFixed(2) + '億';
+  if (v >= 1e4) return (v / 1e4).toFixed(1) + '萬';
+  return v.toLocaleString();
+}
+
+function fmtK(n) {
+  if (!n) return '0';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+  return '' + n;
+}
+
+function fmtTs(ms) {
+  return new Date(ms).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+}
+
+function ago(ms) {
+  const s = Math.floor((Date.now() - ms) / 1000);
+  if (s < 60) return '剛剛';
+  if (s < 3600) return `${Math.floor(s/60)}分前`;
+  if (s < 86400) return `${Math.floor(s/3600)}小時前`;
+  if (s < 2592000) return `${Math.floor(s/86400)}天前`;
+  return new Date(ms).toLocaleDateString('zh-TW');
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.appendChild(document.createTextNode(s));
+  return d.innerHTML;
+}
+
+// ==================== START ====================
+init();
+</script>
+</body>
+</html>
