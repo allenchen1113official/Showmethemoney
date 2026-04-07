@@ -1158,61 +1158,77 @@ async function fetchReddit() {
     </div>`).join('');
 }
 
-// ==================== PTT ====================
+// ==================== PTT (Atom format) ====================
+// PTT rss.ptt.cc 實際為 Atom 格式：<feed>/<entry>，非 RSS 2.0 <channel>/<item>
+// 快取 5 分鐘，避免頻繁呼叫被限速
+const _pttCache = { ts: 0, html: '' };
+const PTT_TTL   = 5 * 60 * 1000;
+
 async function fetchPTT() {
   const el = id('pttContent');
-  const RSS_URL = 'http://rss.ptt.cc/Stock.xml';
+
+  // 有效快取直接使用
+  if (_pttCache.html && Date.now() - _pttCache.ts < PTT_TTL) {
+    el.innerHTML = _pttCache.html;
+    return;
+  }
 
   try {
-    // 強制用 corsproxy.io（比 allorigins 穩定）
-    const r = await fetch(CFG.proxyA + encodeURIComponent(RSS_URL), { signal: AbortSignal.timeout(10000) });
+    const r = await fetch(
+      CFG.proxyA + encodeURIComponent('http://rss.ptt.cc/Stock.xml'),
+      { signal: AbortSignal.timeout(10000) }
+    );
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const text = await r.text();
 
-    // Parse as text/xml for better namespace support
     const xml = new DOMParser().parseFromString(text, 'text/xml');
-    const parseErr = xml.querySelector('parsererror');
-    if (parseErr) throw new Error('XML parse error');
+    if (xml.querySelector('parsererror')) throw new Error('XML parse error');
 
-    const items = xml.getElementsByTagName('item');
-    if (!items.length) throw new Error('No items in RSS');
+    // Atom 格式：文章為 <entry>
+    const entries = xml.getElementsByTagName('entry');
+    if (!entries.length) throw new Error('No <entry> found in Atom feed');
 
-    const posts = Array.from(items).slice(0, 10).map(item => {
-      // In RSS 2.0, <link> text content is the URL
-      const url = item.getElementsByTagName('link')[0]?.textContent?.trim()
-               || item.getElementsByTagName('guid')[0]?.textContent?.trim()
-               || '';
-      // dc:creator namespace
-      const creatorEl = item.getElementsByTagNameNS('*', 'creator')[0];
-      const author = creatorEl?.textContent?.trim()
-                  || item.getElementsByTagName('author')[0]?.textContent?.trim()
-                  || '';
+    const posts = Array.from(entries).slice(0, 10).map(entry => {
+      // Atom <link> 用 href 屬性，不是文字內容
+      const linkEl = entry.querySelector('link[rel="alternate"]') || entry.querySelector('link');
+      const url    = linkEl?.getAttribute('href') || '';
+      // 作者：<author><name>
+      const author = entry.getElementsByTagName('name')[0]?.textContent?.trim() || '';
+      // 時間：<published> 或 <updated>
+      const pubRaw = entry.getElementsByTagName('published')[0]?.textContent?.trim()
+                  || entry.getElementsByTagName('updated')[0]?.textContent?.trim() || '';
       return {
-        title:   item.getElementsByTagName('title')[0]?.textContent?.trim() || '',
-        url,
-        author,
-        pubDate: item.getElementsByTagName('pubDate')[0]?.textContent?.trim() || '',
+        title: entry.getElementsByTagName('title')[0]?.textContent?.trim() || '',
+        url, author, pubRaw,
       };
     });
 
-    el.innerHTML = posts.map(p => {
-      const ts = p.pubDate ? ago(new Date(p.pubDate).getTime()) : '';
-      return `
-        <div class="ptt-item">
-          <a href="${p.url || 'https://www.ptt.cc/bbs/Stock/'}" target="_blank" rel="noopener">
-            <div class="ptt-title">${esc(p.title)}</div>
-          </a>
-          <div class="ptt-meta">
-            <span class="ptt-author"><i class="fa-regular fa-user"></i> ${esc(p.author)}</span>
-            <span class="ntime">${ts}</span>
-          </div>
-        </div>`;
-    }).join('');
+    const html = posts.map(p => `
+      <div class="ptt-item">
+        <a href="${p.url || 'https://www.ptt.cc/bbs/Stock/'}" target="_blank" rel="noopener">
+          <div class="ptt-title">${esc(p.title)}</div>
+        </a>
+        <div class="ptt-meta">
+          <span class="ptt-author"><i class="fa-regular fa-user"></i> ${esc(p.author)}</span>
+          <span class="ntime">${p.pubRaw ? ago(new Date(p.pubRaw).getTime()) : ''}</span>
+        </div>
+      </div>`).join('');
+
+    _pttCache.html = html;
+    _pttCache.ts   = Date.now();
+    el.innerHTML   = html;
+
   } catch (e) {
-    console.warn('[PTT]', e);
-    el.innerHTML = `<div class="err">
-      <i class="fa-solid fa-triangle-exclamation"></i> PTT RSS 暫無法載入<br>
-      <a href="https://www.ptt.cc/bbs/Stock/index.html" target="_blank">前往 PTT Stock板</a>
-    </div>`;
+    console.warn('[PTT]', e.message);
+    if (_pttCache.html) {
+      el.innerHTML = _pttCache.html +
+        '<p style="font-size:.65rem;color:var(--text3);text-align:center;margin-top:.4rem">（快取資料）</p>';
+    } else {
+      el.innerHTML = `<div class="err">
+        <i class="fa-solid fa-triangle-exclamation"></i> PTT 載入失敗<br>
+        <a href="https://www.ptt.cc/bbs/Stock/" target="_blank">前往 PTT Stock 板</a>
+      </div>`;
+    }
   }
 }
 
