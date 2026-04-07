@@ -1079,16 +1079,74 @@ function tlHTML(type, score, month) {
     </a>`;
 }
 
+// ==================== 櫃買指數（TPEx Composite Index）====================
+async function fetchTpexIndex() {
+  // ① Yahoo Finance ^TPEX
+  const q = await yfQuoteIndex('^TPEX');
+  if (q && q.regularMarketPrice) return q;
+
+  // ② TPEx MIS API（即時，OTC01 = 上櫃加權指數）
+  try {
+    const url = 'https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=otc_OTC01.tw&json=1&delay=0';
+    const r = await proxyFetch(url);
+    const d = JSON.parse(await r.text());
+    const m = (d.msgArray || [])[0];
+    if (m) {
+      const price = parseFloat(m.z || m.b || 0);
+      const prev  = parseFloat(m.y || 0);
+      const chg   = price && prev ? price - prev : 0;
+      const pct   = prev > 0 ? chg / prev * 100 : 0;
+      if (price > 0) return {
+        symbol: '^TPEX',
+        regularMarketPrice: price,
+        regularMarketChange: chg,
+        regularMarketChangePercent: pct,
+        regularMarketVolume: 0,
+        volChgPct: null,
+        regularMarketTime: Math.floor(Date.now() / 1000),
+        shortName: '櫃買指數',
+      };
+    }
+  } catch (_) {}
+
+  // ③ TPEx OpenAPI 日收盤（前一交易日）
+  try {
+    const r = await proxyFetch('https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes');
+    const rows = JSON.parse(await r.text());
+    if (Array.isArray(rows) && rows.length) {
+      // 找索引列（代號通常為空或固定字串，尋找含 Index 的標記）
+      const idx = rows.find(row =>
+        !row.SecuritiesCompanyCode &&
+        (row.ClosingIndex || row.Index || row['指數'])
+      ) || rows[rows.length - 1];
+      const price = parseFloat((idx.ClosingIndex || idx.Index || idx['指數'] || '').replace(/,/g,''));
+      if (price > 0) return {
+        symbol: '^TPEX',
+        regularMarketPrice: price,
+        regularMarketChange: 0,
+        regularMarketChangePercent: 0,
+        regularMarketVolume: 0,
+        volChgPct: null,
+        regularMarketTime: Math.floor(Date.now() / 1000),
+        shortName: '櫃買指數',
+      };
+    }
+  } catch (_) {}
+
+  return null;
+}
+
 // ==================== MARKET INDICES ====================
 async function fetchMarkets() {
-  // 加入 ^TPEX（櫃買指數）取代台指期夜盤
-  const intSyms = ['^TWII', '^TPEX', '^N225', '^KS11', '^DJI', '^GSPC', '^IXIC'];
-  const [idxResults] = await Promise.all([
+  const intSyms = ['^TWII', '^N225', '^KS11', '^DJI', '^GSPC', '^IXIC'];
+  const [idxResults, tpex] = await Promise.all([
     Promise.allSettled(intSyms.map(s => yfQuoteIndex(s))),
+    fetchTpexIndex(),
     fetchInstitutional(),
   ]);
   const qm = {};
   idxResults.forEach(r => { if (r.status === 'fulfilled' && r.value) qm[r.value.symbol] = r.value; });
+  if (tpex) qm['^TPEX'] = tpex;
   renderTW(qm);
   renderIntl(qm);
 }
