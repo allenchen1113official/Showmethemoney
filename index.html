@@ -1081,16 +1081,14 @@ function tlHTML(type, score, month) {
 
 // ==================== MARKET INDICES ====================
 async function fetchMarkets() {
-  const intSyms = ['^TWII', '^N225', '^KS11', '^DJI', '^GSPC', '^IXIC'];
-  // 指數 + 台指期 + 三大法人 並行
-  const [idxResults, fut] = await Promise.all([
+  // 加入 ^TPEX（櫃買指數）取代台指期夜盤
+  const intSyms = ['^TWII', '^TPEX', '^N225', '^KS11', '^DJI', '^GSPC', '^IXIC'];
+  const [idxResults] = await Promise.all([
     Promise.allSettled(intSyms.map(s => yfQuoteIndex(s))),
-    fetchTaifex(),
     fetchInstitutional(),
   ]);
   const qm = {};
   idxResults.forEach(r => { if (r.status === 'fulfilled' && r.value) qm[r.value.symbol] = r.value; });
-  if (fut) qm['FITX=F'] = fut;
   renderTW(qm);
   renderIntl(qm);
 }
@@ -1183,15 +1181,10 @@ function mktItem(q, flag, name, sub) {
 
 function renderTW(qm) {
   const el = id('twMkt');
-  const taiex = qm['^TWII'], fut = qm['FITX=F'];
-  // 判斷台指期是否為夜盤（台灣時間 15:30–05:00 為夜盤區間）
-  const now = new Date();
-  const twHour = parseInt(now.toLocaleString('en-US', { hour: '2-digit', hour12: false, timeZone: 'Asia/Taipei' }));
-  const isNight = twHour >= 15 || twHour < 5;
-  const futLabel = isNight ? '台指期<span class="night-badge">夜盤</span>' : '台指期';
+  const taiex = qm['^TWII'], tpex = qm['^TPEX'];
   el.innerHTML =
     mktItem(taiex, '🇹🇼', '台灣加權指數', 'TAIEX') +
-    mktItemLabel(fut, '📊', futLabel, 'FITX');
+    mktItem(tpex,  '🏪',  '櫃買指數',     'TPEx');
   id('twTs').textContent = taiex ? fmtTs(taiex.regularMarketTime * 1000) : '';
 }
 
@@ -1290,26 +1283,50 @@ async function loadTpexAll() {
   } catch (e) { console.warn('[TPEx all]', e.message); }
 }
 
+// 批次載入 TWSE 上市公司簡稱（一次拉全部，輕量）
+let _twseListLoaded = false;
+async function loadTwseList() {
+  if (_twseListLoaded) return;
+  try {
+    // t187ap03_L：上市公司基本資料，含公司代號 + 公司簡稱
+    const r = await proxyFetch('https://openapi.twse.com.tw/v1/opendata/t187ap03_L');
+    const rows = JSON.parse(await r.text());
+    if (!Array.isArray(rows) || !rows.length) return;
+    _twseListLoaded = true;
+    rows.forEach(row => {
+      const code = String(row['公司代號'] || row.Code || '').trim();
+      const name = row['公司簡稱'] || row['公司全名'] || parseName(row);
+      if (code && name && !_twseNameCache[code]) _twseNameCache[code] = name;
+    });
+  } catch (e) { console.warn('[TWSE list]', e.message); }
+}
+
 async function fetchTwseNames(stocks) {
   const toFetch = stocks.filter(s => s && !_twseNameCache[s]);
   if (!toFetch.length) return;
 
-  // ① TWSE 上市：STOCK_DAY 含股名
-  const needOtc = [];
-  await Promise.allSettled(toFetch.map(async s => {
-    try {
-      const url = `https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY?stockNo=${s}`;
-      const r = await proxyFetch(url);
-      const rows = JSON.parse(await r.text());
-      if (Array.isArray(rows) && rows.length) {
-        const name = parseName(rows[0]);
-        if (name) { _twseNameCache[s] = name; return; }
-      }
-    } catch (_) {}
-    needOtc.push(s);
-  }));
+  // ① 批次載入 TWSE 上市名稱（含全部上市股，一次解決）
+  await loadTwseList();
 
-  // ② TPEx：批次載入（若有上櫃股）
+  // ② 仍缺的（可能是上櫃）→ 嘗試 STOCK_DAY 逐一查
+  const stillMissing = toFetch.filter(s => !_twseNameCache[s]);
+  const needOtc = [];
+  if (stillMissing.length) {
+    await Promise.allSettled(stillMissing.map(async s => {
+      try {
+        const url = `https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY?stockNo=${s}`;
+        const r = await proxyFetch(url);
+        const rows = JSON.parse(await r.text());
+        if (Array.isArray(rows) && rows.length) {
+          const name = parseName(rows[0]);
+          if (name) { _twseNameCache[s] = name; return; }
+        }
+      } catch (_) {}
+      needOtc.push(s); // TWSE 都查不到 → 判定為上櫃
+    }));
+  }
+
+  // ③ 上櫃：TPEx 批次（含名稱 + 股價）
   if (needOtc.length) {
     needOtc.forEach(s => _otcSet.add(s));
     await loadTpexAll();
@@ -1403,21 +1420,25 @@ async function fetchPortfolio() {
 }
 
 // ==================== PORTFOLIO NEWS (Google News RSS) ====================
-// 解析 Google News RSS <link>（文字節點在元素後 nextSibling，或 guid）
+// 解析 Google News RSS <link>
+// Google News RSS 的 <link> 是普通文字節點，DOMParser 解析後 textContent 即 URL
 function gnLink(item) {
-  try {
-    // Google News RSS: <link/> 後面緊跟文字節點
-    const linkEl = item.getElementsByTagName('link')[0];
-    if (linkEl) {
-      const nv = linkEl.nextSibling?.nodeValue?.trim();
-      if (nv && nv.startsWith('http')) return nv;
-      const tc = linkEl.textContent?.trim();
-      if (tc && tc.startsWith('http')) return tc;
-    }
-  } catch (_) {}
-  // fallback: <guid>
-  const guid = item.querySelector('guid')?.textContent?.trim();
-  return (guid && guid.startsWith('http')) ? guid : '#';
+  // 方法①：<link> textContent（最可靠）
+  const links = item.getElementsByTagName('link');
+  for (let i = 0; i < links.length; i++) {
+    const tc = links[i].textContent?.trim();
+    if (tc && tc.startsWith('http')) return tc;
+    // 某些 parser 把 URL 放在 nextSibling text node
+    const nv = links[i].nextSibling?.nodeValue?.trim();
+    if (nv && nv.startsWith('http')) return nv;
+  }
+  // 方法②：<guid>（Google News 的 guid 通常也是文章 URL）
+  const guids = item.getElementsByTagName('guid');
+  for (let i = 0; i < guids.length; i++) {
+    const g = guids[i].textContent?.trim();
+    if (g && g.startsWith('http')) return g;
+  }
+  return '';
 }
 
 async function fetchPortNews() {
@@ -1453,7 +1474,7 @@ async function fetchPortNews() {
         link:    gnLink(item),
         publisher: item.querySelector('source')?.textContent?.trim() || '',
         _ts:     new Date(item.querySelector('pubDate')?.textContent || 0).getTime() || 0,
-      })).filter(n => n.title && n.link !== '#');
+      })).filter(n => n.title);
     } catch (_) { return []; }
   });
 
