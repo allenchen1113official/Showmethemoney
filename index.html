@@ -1219,14 +1219,20 @@ async function fetchReddit() {
   const allPosts = [];
 
   const jobs = subs.map(async sub => {
+    const apiUrl = `https://www.reddit.com/r/${sub}/hot.json?limit=8&raw_json=1`;
+    let d = null;
+    // Try direct fetch first; if CORS blocked, fall back to proxy
     try {
-      const r = await fetch(
-        `https://www.reddit.com/r/${sub}/hot.json?limit=6&raw_json=1`,
-        { signal: AbortSignal.timeout(8000) }
-      );
-      const d = await r.json();
-      return (d.data?.children || []).map(c => ({ ...c.data, _sub: sub }));
-    } catch (_) { return []; }
+      const r = await fetch(apiUrl, { signal: AbortSignal.timeout(6000) });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      d = await r.json();
+    } catch (_) {
+      try {
+        const r2 = await proxyFetch(apiUrl);
+        d = JSON.parse(await r2.text());
+      } catch (__) { return []; }
+    }
+    return (d?.data?.children || []).map(c => ({ ...c.data, _sub: sub }));
   });
 
   const res = await Promise.allSettled(jobs);
@@ -1241,7 +1247,7 @@ async function fetchReddit() {
   const top = allPosts
     .filter(p => !p.stickied && p.title)
     .sort((a, b) => b.ups - a.ups)
-    .slice(0, 10);
+    .slice(0, 5);
 
   el.innerHTML = top.map((p, i) => `
     <div class="reddit-item">
@@ -1287,7 +1293,7 @@ async function fetchPTT() {
     const entries = xml.getElementsByTagName('entry');
     if (!entries.length) throw new Error('No <entry> found in Atom feed');
 
-    const posts = Array.from(entries).slice(0, 10).map(entry => {
+    const posts = Array.from(entries).slice(0, 5).map(entry => {
       // Atom <link> 用 href 屬性，不是文字內容
       const linkEl = entry.querySelector('link[rel="alternate"]') || entry.querySelector('link');
       const url    = linkEl?.getAttribute('href') || '';
@@ -1331,50 +1337,95 @@ async function fetchPTT() {
   }
 }
 
-// ==================== FINANCE NEWS ====================
+// ==================== FINANCE NEWS (Google News RSS) ====================
+// Google News RSS: stable, supports Chinese keywords, no API key needed
+const _finCache = { ts: 0, html: '' };
+const FIN_TTL   = 5 * 60 * 1000;
+
 async function fetchFinanceNews() {
   const el = id('finContent');
-  const allNews = [];
-  const queries = ['台股', 'TAIEX', '台積電', '美股'];
 
-  const jobs = queries.slice(0, 3).map(async q => {
+  if (_finCache.html && Date.now() - _finCache.ts < FIN_TTL) {
+    el.innerHTML = _finCache.html;
+    return;
+  }
+
+  // Google News RSS for TW financial keywords
+  const queries = ['台股 股市', '美股 那斯達克', '台積電 2330', '財經 投資'];
+  const allItems = [];
+
+  const jobs = queries.map(async q => {
+    const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant`;
     try {
-      const r = await proxyFetch(CFG.yfSrc + encodeURIComponent(q) + '&newsCount=5&lang=zh-TW');
-      const d = JSON.parse(await r.text());
-      return d.news || [];
+      const r = await proxyFetch(rssUrl);
+      const text = await r.text();
+      const xml = new DOMParser().parseFromString(text, 'text/xml');
+      if (xml.querySelector('parsererror')) return [];
+      return Array.from(xml.querySelectorAll('item')).slice(0, 5).map(item => ({
+        title:     item.querySelector('title')?.textContent?.trim() || '',
+        link:      item.querySelector('link')?.nextSibling?.textContent?.trim()
+                || item.querySelector('link')?.textContent?.trim() || '#',
+        publisher: item.querySelector('source')?.textContent?.trim() || '',
+        pubDate:   item.querySelector('pubDate')?.textContent?.trim() || '',
+        _ts:       new Date(item.querySelector('pubDate')?.textContent || 0).getTime() || 0,
+      }));
     } catch (_) { return []; }
   });
 
   const res = await Promise.allSettled(jobs);
-  res.forEach(r => { if (r.status === 'fulfilled') allNews.push(...r.value); });
+  res.forEach(r => { if (r.status === 'fulfilled') allItems.push(...r.value); });
 
-  if (!allNews.length) {
-    el.innerHTML = '<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 財經新聞載入失敗</div>';
+  if (!allItems.length) {
+    // last resort: try Yahoo Finance TW RSS
+    try {
+      const r = await proxyFetch('https://tw.news.yahoo.com/rss/finance');
+      const text = await r.text();
+      const xml = new DOMParser().parseFromString(text, 'text/xml');
+      Array.from(xml.querySelectorAll('item')).slice(0, 10).forEach(item => {
+        allItems.push({
+          title:     item.querySelector('title')?.textContent?.trim() || '',
+          link:      item.querySelector('link')?.nextSibling?.textContent?.trim()
+                  || item.querySelector('link')?.textContent?.trim() || '#',
+          publisher: 'Yahoo Finance',
+          pubDate:   item.querySelector('pubDate')?.textContent?.trim() || '',
+          _ts:       new Date(item.querySelector('pubDate')?.textContent || 0).getTime() || 0,
+        });
+      });
+    } catch (_) {}
+  }
+
+  if (!allItems.length) {
+    el.innerHTML = '<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 財經新聞載入失敗<br><small>請稍後重試</small></div>';
     return;
   }
 
+  // Deduplicate by title, sort by time desc, take top 10
   const seen = new Set();
-  const top = allNews
-    .sort((a, b) => (b.providerPublishTime||0) - (a.providerPublishTime||0))
-    .filter(n => { if (seen.has(n.uuid)) return false; seen.add(n.uuid); return true; })
+  const top = allItems
+    .filter(n => { if (!n.title || seen.has(n.title)) return false; seen.add(n.title); return true; })
+    .sort((a, b) => b._ts - a._ts)
     .slice(0, 10);
 
-  el.innerHTML = top.map((n, i) => {
+  const html = top.map((n, i) => {
     const rankCls = i === 0 ? 'gold' : i === 1 ? 'silver' : i === 2 ? 'bronze' : '';
     return `
       <div class="news-item">
         <div style="display:flex;align-items:flex-start;gap:.4rem">
           <span class="news-rank ${rankCls}">#${i+1}</span>
-          <a href="${n.link||'#'}" target="_blank" rel="noopener" style="flex:1">
-            <div class="news-title">${esc(n.title||'')}</div>
+          <a href="${n.link}" target="_blank" rel="noopener" style="flex:1">
+            <div class="news-title">${esc(n.title)}</div>
           </a>
         </div>
         <div class="news-meta" style="padding-left:1.7rem">
-          <span class="tag tag-src">${esc(n.publisher||'')}</span>
-          <span class="ntime">${n.providerPublishTime ? ago(n.providerPublishTime*1000) : ''}</span>
+          ${n.publisher ? `<span class="tag tag-src">${esc(n.publisher)}</span>` : ''}
+          <span class="ntime">${n._ts ? ago(n._ts) : ''}</span>
         </div>
       </div>`;
   }).join('');
+
+  _finCache.html = html;
+  _finCache.ts   = Date.now();
+  el.innerHTML   = html;
 }
 
 // ==================== PORTFOLIO MODAL ====================
