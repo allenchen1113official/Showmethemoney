@@ -18,8 +18,8 @@
       --text2: #8b949e;
       --text3: #656d76;
       --blue: #388bfd;
-      --up: #3fb950;
-      --down: #f85149;
+      --up: #f85149;    /* 台灣慣例：上漲=紅 */
+      --down: #3fb950;  /* 台灣慣例：下跌=綠 */
       --warn: #d29922;
       --card-radius: 10px;
     }
@@ -435,6 +435,35 @@
     ::-webkit-scrollbar-track { background: var(--bg2); }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
+    /* ===== FINANCIAL CALENDAR ===== */
+    .fin-day { margin-bottom: .75rem; }
+    .fin-day:last-child { margin-bottom: 0; }
+    .fin-day-lbl {
+      font-size: .7rem; font-weight: 700; color: var(--blue);
+      border-bottom: 1px solid var(--border); padding-bottom: .2rem; margin-bottom: .3rem;
+      display: flex; align-items: center; gap: .4rem;
+    }
+    .fin-day-today .fin-day-lbl { color: #ffd700; }
+    .fin-event {
+      display: flex; align-items: flex-start; gap: .5rem;
+      padding: .28rem 0; border-bottom: 1px solid rgba(255,255,255,.03);
+      font-size: .75rem; line-height: 1.4;
+    }
+    .fin-event:last-child { border-bottom: none; }
+    .ev-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      flex-shrink: 0; margin-top: .35rem;
+    }
+    .ev-fed   { background: #f0a500; }
+    .ev-cbc   { background: var(--blue); }
+    .ev-data  { background: #a371f7; }
+    .ev-earn  { background: #e040fb; }
+    .ev-mkt   { background: #3fb950; }
+    .ev-name  { color: var(--text); }
+    .ev-note  { font-size: .65rem; color: var(--text3); margin-top: .05rem; }
+    .ev-imp-high .ev-name { font-weight: 600; }
+    .fin-empty { font-size: .75rem; color: var(--text3); text-align: center; padding: .5rem 0; }
+
     /* ===== FOOTER ===== */
     .footer {
       text-align: center;
@@ -533,6 +562,17 @@
       </div>
       <div class="card-bd">
         <div id="intlMkt" class="loading"><i class="fa-solid fa-circle-notch"></i> 載入中...</div>
+      </div>
+    </div>
+
+    <!-- 財經日誌 -->
+    <div class="card">
+      <div class="card-hd">
+        <div class="card-title"><i class="fa-solid fa-calendar-days"></i> 財經日誌</div>
+        <span class="ts">昨天∙今天∙本週</span>
+      </div>
+      <div class="card-bd" id="finCal">
+        <div class="loading"><i class="fa-solid fa-circle-notch"></i> 載入中...</div>
       </div>
     </div>
 
@@ -909,52 +949,168 @@ async function fetchPortfolio() {
   }).join('');
 }
 
-// ==================== PORTFOLIO NEWS ====================
+// ==================== PORTFOLIO NEWS (TWSE OpenAPI) ====================
 async function fetchPortNews() {
   const el = id('portNews');
-  const valid = portfolio.filter(Boolean).slice(0, 5);
+  const valid = portfolio.filter(Boolean);
   if (!valid.length) {
     el.innerHTML = '<p style="text-align:center;color:var(--text3);font-size:.78rem;padding:1rem">請先設定自選股</p>';
     return;
   }
-  el.innerHTML = '<div class="loading"><i class="fa-solid fa-circle-notch"></i> 載入新聞...</div>';
+  el.innerHTML = '<div class="loading"><i class="fa-solid fa-circle-notch"></i> 載入中...</div>';
 
-  const allNews = [];
-  const jobs = valid.map(async s => {
+  const allItems = [];
+
+  // ① TWSE OpenAPI - 個股當日收盤資訊（最近交易日）
+  const twseJobs = valid.slice(0, 10).map(async stock => {
     try {
-      const r = await proxyFetch(CFG.yfSrc + encodeURIComponent(s + '.TW') + '&newsCount=4&lang=zh-TW');
-      const d = JSON.parse(await r.text());
-      return (d.news || []).map(n => ({ ...n, _ticker: s }));
+      const url = `https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY?stockNo=${stock}`;
+      const r = await proxyFetch(url);
+      const rows = JSON.parse(await r.text());
+      if (!Array.isArray(rows) || !rows.length) return [];
+      const latest = rows[rows.length - 1];
+      return [{
+        _ticker: stock,
+        title: `${stock} ${latest['股票名稱']||''} — 收盤 ${latest['收盤價']||'–'} 元，成交量 ${latest['成交股數']||'–'} 股`,
+        link: `https://www.twse.com.tw/zh/trading/historical/stock-day.html`,
+        time: latest['日期'] || '',
+        src: 'TWSE',
+      }];
     } catch (_) { return []; }
   });
 
-  const results = await Promise.allSettled(jobs);
-  results.forEach(r => { if (r.status === 'fulfilled') allNews.push(...r.value); });
+  // ② TWSE OpenAPI - 上市公司重大訊息（全市場最新）
+  const annoJob = (async () => {
+    try {
+      const today = new Date();
+      const ds = `${today.getFullYear()}${String(today.getMonth()+1).padStart(2,'0')}${String(today.getDate()).padStart(2,'0')}`;
+      const url = `https://openapi.twse.com.tw/v1/announcement/queryMajorAnnouncement?date=${ds}`;
+      const r = await proxyFetch(url);
+      const rows = JSON.parse(await r.text());
+      if (!Array.isArray(rows)) return [];
+      return rows
+        .filter(row => valid.includes(row['公司代號'] || row['stockNo'] || ''))
+        .map(row => ({
+          _ticker: row['公司代號'] || row['stockNo'] || '',
+          title: row['主旨'] || row['subject'] || row['title'] || JSON.stringify(row).substring(0, 80),
+          link: `https://mops.twse.com.tw/mops/web/t05sr01_1?co_id=${row['公司代號']||''}`,
+          time: row['發言日期'] || row['date'] || '',
+          src: 'TWSE重大訊息',
+        }));
+    } catch (_) { return []; }
+  })();
 
-  if (!allNews.length) {
-    el.innerHTML = '<p class="err">暫無新聞資料</p>';
+  const all = await Promise.allSettled([...twseJobs, annoJob]);
+  all.forEach(r => { if (r.status === 'fulfilled') allItems.push(...r.value); });
+
+  if (!allItems.length) {
+    el.innerHTML = `<div class="err">
+      <i class="fa-solid fa-triangle-exclamation"></i> 暫無資料
+      <div style="margin-top:.4rem">
+        <a href="https://openapi.twse.com.tw/" target="_blank" style="color:var(--blue)">TWSE OpenAPI</a>
+      </div>
+    </div>`;
     return;
   }
 
-  const seen = new Set();
-  const items = allNews
-    .sort((a, b) => (b.providerPublishTime||0) - (a.providerPublishTime||0))
-    .filter(n => { if (seen.has(n.uuid)) return false; seen.add(n.uuid); return true; })
-    .slice(0, 16);
-
-  el.innerHTML = items.map(n => `
+  el.innerHTML = allItems.slice(0, 20).map(n => `
     <div class="pn-item">
       <a href="${n.link||'#'}" target="_blank" rel="noopener">
         <div class="pn-title">${esc(n.title||'')}</div>
       </a>
       <div class="pn-meta">
         <span class="tag tag-ticker">${esc(n._ticker)}</span>
-        <span class="ntime">${esc(n.publisher||'')}</span>
-        <span class="ntime">${n.providerPublishTime ? ago(n.providerPublishTime*1000) : ''}</span>
+        <span class="ntime">${esc(n.src||'')}</span>
+        <span class="ntime">${esc(n.time||'')}</span>
       </div>
     </div>`).join('');
 
   id('pnTs').textContent = fmtTs(Date.now());
+}
+
+// ==================== FINANCIAL CALENDAR ====================
+function fetchFinCal() {
+  const el = id('finCal');
+
+  // 財經事件資料庫 (2026)
+  const EVS = [
+    // ── 台灣 ──
+    { d:'2026-04-07', name:'台灣 CPI 公布（3月）',    cat:'data', note:'主計總處', url:'https://www.stat.gov.tw/' },
+    { d:'2026-04-07', name:'台灣三大法人買賣超',       cat:'mkt',  note:'TWSE',    url:'https://www.twse.com.tw/' },
+    { d:'2026-04-15', name:'台灣外銷訂單（2月）',      cat:'data', note:'經濟部',   url:'https://www.moea.gov.tw/' },
+    { d:'2026-04-17', name:'台灣 GDP 初估（Q1）',      cat:'data', note:'主計總處', url:'https://www.dgbas.gov.tw/' },
+    { d:'2026-05-06', name:'台灣 CPI 公布（4月）',     cat:'data', note:'主計總處', url:'https://www.stat.gov.tw/' },
+    { d:'2026-06-18', name:'台灣央行利率決策',          cat:'cbc',  note:'中央銀行', url:'https://www.cbc.gov.tw/' },
+    { d:'2026-09-17', name:'台灣央行利率決策',          cat:'cbc',  note:'中央銀行', url:'https://www.cbc.gov.tw/' },
+    { d:'2026-12-17', name:'台灣央行利率決策',          cat:'cbc',  note:'中央銀行', url:'https://www.cbc.gov.tw/' },
+    // ── 美國 ──
+    { d:'2026-04-06', name:'美國 ISM 服務業 PMI',       cat:'data', note:'ISM',     url:'https://www.ismworld.org/' },
+    { d:'2026-04-09', name:'美國 PPI 公布（3月）',      cat:'data', note:'BLS',     url:'https://www.bls.gov/' },
+    { d:'2026-04-10', name:'美國 CPI 公布（3月）',      cat:'data', note:'BLS',     url:'https://www.bls.gov/' },
+    { d:'2026-04-11', name:'密大消費者信心初值',        cat:'data', note:'UofM',    url:'https://data.sca.isr.umich.edu/' },
+    { d:'2026-04-16', name:'美國零售銷售（3月）',       cat:'data', note:'Census',  url:'https://www.census.gov/' },
+    { d:'2026-04-17', name:'費城聯準銀行製造業指數',   cat:'data', note:'Fed Philly',url:'https://www.philadelphiafed.org/' },
+    { d:'2026-04-29', name:'FOMC 利率決策',             cat:'fed',  note:'聯準會',  url:'https://www.federalreserve.gov/' },
+    { d:'2026-04-30', name:'美國 GDP 初估（Q1）',       cat:'data', note:'BEA',     url:'https://www.bea.gov/' },
+    { d:'2026-05-01', name:'美國非農就業（4月）',       cat:'data', note:'BLS',     url:'https://www.bls.gov/' },
+    { d:'2026-05-13', name:'美國 CPI 公布（4月）',      cat:'data', note:'BLS',     url:'https://www.bls.gov/' },
+    { d:'2026-06-10', name:'FOMC 利率決策',             cat:'fed',  note:'聯準會',  url:'https://www.federalreserve.gov/' },
+    // ── 日本 ──
+    { d:'2026-04-08', name:'日本 BOJ 議事錄公布',       cat:'cbc',  note:'日本銀行', url:'https://www.boj.or.jp/' },
+    // ── 中國 ──
+    { d:'2026-04-09', name:'中國 CPI / PPI（3月）',     cat:'data', note:'國家統計局',url:'http://www.stats.gov.cn/' },
+    { d:'2026-04-13', name:'中國貿易數據（3月）',       cat:'data', note:'海關總署', url:'http://www.customs.gov.cn/' },
+  ];
+
+  const now   = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yest  = new Date(today); yest.setDate(yest.getDate() - 1);
+  const end   = new Date(today); end.setDate(end.getDate() + 7);
+
+  // 轉換日期字串為 Date
+  const toDate = s => { const [y,m,d] = s.split('-').map(Number); return new Date(y,m-1,d); };
+
+  const inRange = EVS
+    .map(e => ({ ...e, _date: toDate(e.d) }))
+    .filter(e => e._date >= yest && e._date <= end)
+    .sort((a,b) => a._date - b._date);
+
+  if (!inRange.length) {
+    el.innerHTML = '<p class="fin-empty">本週無重大財經事件</p>';
+    return;
+  }
+
+  const dayFmt = d => d.toLocaleDateString('zh-TW', { month:'2-digit', day:'2-digit', weekday:'short' });
+  const isToday = d => d.getTime() === today.getTime();
+  const isYest  = d => d.getTime() === yest.getTime();
+
+  // 按天分組
+  const groups = {};
+  inRange.forEach(e => {
+    const k = e.d;
+    if (!groups[k]) groups[k] = { date: e._date, events: [] };
+    groups[k].events.push(e);
+  });
+
+  const dotCls = { fed:'ev-fed', cbc:'ev-cbc', data:'ev-data', earn:'ev-earn', mkt:'ev-mkt' };
+
+  el.innerHTML = Object.values(groups).map(g => {
+    const lbl = isToday(g.date) ? '📌 今天 ' + dayFmt(g.date)
+              : isYest(g.date)  ? '⏮ 昨天 ' + dayFmt(g.date)
+              : '📅 ' + dayFmt(g.date);
+    const dayCls = isToday(g.date) ? 'fin-day fin-day-today' : 'fin-day';
+    const evHtml = g.events.map(e => `
+      <div class="fin-event ev-imp-${e.imp||'normal'}">
+        <div class="ev-dot ${dotCls[e.cat]||'ev-data'}"></div>
+        <div>
+          <a href="${e.url}" target="_blank" rel="noopener" style="text-decoration:none;color:inherit">
+            <div class="ev-name">${esc(e.name)}</div>
+          </a>
+          <div class="ev-note">${esc(e.note)}</div>
+        </div>
+      </div>`).join('');
+    return `<div class="${dayCls}"><div class="fin-day-lbl">${lbl}</div>${evHtml}</div>`;
+  }).join('');
 }
 
 // ==================== REDDIT ====================
@@ -1008,7 +1164,8 @@ async function fetchPTT() {
   const RSS_URL = 'http://rss.ptt.cc/Stock.xml';
 
   try {
-    const r = await proxyFetch(RSS_URL);
+    // 強制用 corsproxy.io（比 allorigins 穩定）
+    const r = await fetch(CFG.proxyA + encodeURIComponent(RSS_URL), { signal: AbortSignal.timeout(10000) });
     const text = await r.text();
 
     // Parse as text/xml for better namespace support
@@ -1148,6 +1305,7 @@ async function refreshAll() {
   const btn = id('refreshBtn');
   if (btn) { btn.classList.add('spinning'); btn.disabled = true; }
 
+  fetchFinCal(); // 同步，不需 await
   await Promise.allSettled([
     fetchTL(),
     fetchMarkets(),
