@@ -105,6 +105,68 @@
     .btn-icon:hover { border-color: var(--blue); color: var(--blue); }
     .btn-icon.spinning i { animation: spin 1s linear infinite; }
 
+    /* ===== QUOTE BANNER ===== */
+    #quoteBanner {
+      background: linear-gradient(90deg, rgba(26,31,46,0.98) 0%, rgba(22,27,34,0.95) 100%);
+      border-bottom: 1px solid rgba(255,215,0,0.18);
+      padding: 0.55rem 1.5rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      min-height: 42px;
+    }
+    .quote-icon {
+      font-size: 1.2rem;
+      color: #ffd700;
+      flex-shrink: 0;
+      opacity: 0.85;
+    }
+    .quote-body {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+    }
+    .quote-text {
+      font-size: 0.82rem;
+      color: #e6d8a8;
+      font-style: italic;
+      letter-spacing: 0.02em;
+      line-height: 1.4;
+    }
+    .quote-text::before { content: '「'; color: #ffd700; font-style: normal; font-weight: 700; }
+    .quote-text::after  { content: '」'; color: #ffd700; font-style: normal; font-weight: 700; }
+    .quote-author {
+      font-size: 0.75rem;
+      color: #ffd700;
+      font-weight: 600;
+      white-space: nowrap;
+      opacity: 0.9;
+    }
+    .quote-author::before { content: '— '; }
+    .quote-cat {
+      font-size: 0.65rem;
+      padding: 0.1rem 0.4rem;
+      border-radius: 999px;
+      background: rgba(255,215,0,0.1);
+      color: rgba(255,215,0,0.65);
+      border: 1px solid rgba(255,215,0,0.2);
+      white-space: nowrap;
+    }
+    .quote-refresh {
+      background: none;
+      border: none;
+      color: rgba(255,215,0,0.45);
+      cursor: pointer;
+      font-size: 0.75rem;
+      padding: 0.15rem 0.3rem;
+      border-radius: 4px;
+      transition: color .2s;
+      flex-shrink: 0;
+    }
+    .quote-refresh:hover { color: #ffd700; }
+
     /* ===== MAIN GRID ===== */
     .main {
       max-width: 1900px;
@@ -524,6 +586,17 @@
   </div>
 </header>
 
+<!-- ===== QUOTE BANNER ===== -->
+<div id="quoteBanner">
+  <span class="quote-icon">📖</span>
+  <div class="quote-body">
+    <span class="quote-text" id="quoteText">載入中…</span>
+    <span class="quote-author" id="quoteAuthor"></span>
+    <span class="quote-cat" id="quoteCat"></span>
+  </div>
+  <button class="quote-refresh" onclick="fetchQuote()" title="換一句"><i class="fa-solid fa-shuffle"></i></button>
+</div>
+
 <!-- ===== MAIN ===== -->
 <div class="main">
 
@@ -688,11 +761,37 @@ const TL_MAP = {
 let portfolio = [];
 let refreshTimer = null;
 
+// ==================== QUOTE API ====================
+let _quotesCache = null;
+
+async function fetchQuote() {
+  try {
+    if (!_quotesCache) {
+      const res = await fetch('./quotes.json?t=' + Date.now());
+      const data = await res.json();
+      _quotesCache = data.quotes || [];
+    }
+    if (!_quotesCache.length) return;
+    const q = _quotesCache[Math.floor(Math.random() * _quotesCache.length)];
+    const el = id('quoteText'), ae = id('quoteAuthor'), ce = id('quoteCat');
+    if (el) el.textContent = q.text;
+    if (ae) ae.textContent = q.author;
+    if (ce) ce.textContent = q.category || '';
+  } catch(e) {
+    const el = id('quoteText');
+    if (el) el.textContent = '在別人貪婪時恐懼，在別人恐懼時貪婪。';
+    const ae = id('quoteAuthor');
+    if (ae) ae.textContent = '華倫·巴菲特';
+  }
+}
+
 // ==================== INIT ====================
 function init() {
   loadPortfolio();
   startClock();
   bindModalEvents();
+  fetchQuote();
+  setInterval(fetchQuote, 10 * 60 * 1000); // rotate every 10 min
   refreshAll();
   refreshTimer = setInterval(refreshAll, CFG.refreshMs);
 }

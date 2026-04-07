@@ -1,0 +1,146 @@
+{
+  "version": "1.0",
+  "description": "股市聖經 - 投資智慧語錄",
+  "quotes": [
+    {
+      "id": 1,
+      "text": "市場長線是投票機，短線是提款機。",
+      "author": "本傑明·格雷厄姆",
+      "author_en": "Benjamin Graham",
+      "category": "市場原理"
+    },
+    {
+      "id": 2,
+      "text": "在別人貪婪時恐懼，在別人恐懼時貪婪。",
+      "author": "華倫·巴菲特",
+      "author_en": "Warren Buffett",
+      "category": "投資心理"
+    },
+    {
+      "id": 3,
+      "text": "投資最重要的是不要賠錢，第二重要的是記住第一條。",
+      "author": "華倫·巴菲特",
+      "author_en": "Warren Buffett",
+      "category": "風險管理"
+    },
+    {
+      "id": 4,
+      "text": "時間是優秀企業的朋友，卻是平庸企業的敵人。",
+      "author": "華倫·巴菲特",
+      "author_en": "Warren Buffett",
+      "category": "長期投資"
+    },
+    {
+      "id": 5,
+      "text": "股市是將財富從沒有耐心的人轉移到有耐心的人手中的工具。",
+      "author": "華倫·巴菲特",
+      "author_en": "Warren Buffett",
+      "category": "投資心理"
+    },
+    {
+      "id": 6,
+      "text": "如果你不願意持有一檔股票十年，就不要持有它十分鐘。",
+      "author": "華倫·巴菲特",
+      "author_en": "Warren Buffett",
+      "category": "長期投資"
+    },
+    {
+      "id": 7,
+      "text": "不要把所有雞蛋放在同一個籃子裡。",
+      "author": "馬克·吐溫",
+      "author_en": "Mark Twain",
+      "category": "分散投資"
+    },
+    {
+      "id": 8,
+      "text": "價格是你付出的，價值是你得到的。",
+      "author": "華倫·巴菲特",
+      "author_en": "Warren Buffett",
+      "category": "價值投資"
+    },
+    {
+      "id": 9,
+      "text": "預測市場短期走勢的人，告訴你的不是市場的事，而是他自己的心理狀態。",
+      "author": "本傑明·格雷厄姆",
+      "author_en": "Benjamin Graham",
+      "category": "市場原理"
+    },
+    {
+      "id": 10,
+      "text": "風險來自於你不知道自己在做什麼。",
+      "author": "華倫·巴菲特",
+      "author_en": "Warren Buffett",
+      "category": "風險管理"
+    },
+    {
+      "id": 11,
+      "text": "廣泛分散投資是無知的保護。對於知道自己在做什麼的人，廣泛分散沒有必要。",
+      "author": "華倫·巴菲特",
+      "author_en": "Warren Buffett",
+      "category": "分散投資"
+    },
+    {
+      "id": 12,
+      "text": "買進一家公司的股票，就像買進這家公司的一部分。",
+      "author": "本傑明·格雷厄姆",
+      "author_en": "Benjamin Graham",
+      "category": "價值投資"
+    },
+    {
+      "id": 13,
+      "text": "投資人的主要問題，乃至最大的敵人，就是他自己。",
+      "author": "本傑明·格雷厄姆",
+      "author_en": "Benjamin Graham",
+      "category": "投資心理"
+    },
+    {
+      "id": 14,
+      "text": "要在市場上成功，你需要具備正確的氣質，而不是正確的智商。",
+      "author": "華倫·巴菲特",
+      "author_en": "Warren Buffett",
+      "category": "投資心理"
+    },
+    {
+      "id": 15,
+      "text": "牛市讓人感覺像天才，熊市才能看出誰是真正的投資者。",
+      "author": "彼得·林區",
+      "author_en": "Peter Lynch",
+      "category": "市場原理"
+    },
+    {
+      "id": 16,
+      "text": "了解你所持有的股票，並確保你買入的理由足夠充分。",
+      "author": "彼得·林區",
+      "author_en": "Peter Lynch",
+      "category": "價值投資"
+    },
+    {
+      "id": 17,
+      "text": "市場崩跌是投資者最好的朋友，讓你能以折扣價買入優質企業。",
+      "author": "華倫·巴菲特",
+      "author_en": "Warren Buffett",
+      "category": "市場原理"
+    },
+    {
+      "id": 18,
+      "text": "複利是世界第八大奇蹟，懂得它的人賺它，不懂的人付它。",
+      "author": "阿爾伯特·愛因斯坦",
+      "author_en": "Albert Einstein",
+      "category": "長期投資"
+    },
+    {
+      "id": 19,
+      "text": "投資人最不需要的就是在錯誤時間以錯誤價格買入正確的股票。",
+      "author": "本傑明·格雷厄姆",
+      "author_en": "Benjamin Graham",
+      "category": "市場原理"
+    },
+    {
+      "id": 20,
+      "text": "真正的投資不是預測未來，而是以低於價值的價格買入資產。",
+      "author": "塞思·卡拉曼",
+      "author_en": "Seth Klarman",
+      "category": "價值投資"
+    }
+  ]
+}
