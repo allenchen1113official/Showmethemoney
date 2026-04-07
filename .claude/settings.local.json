@@ -21,7 +21,12 @@
       "Bash(git config:*)",
       "Bash(chmod +x \"/Users/allenchen/Library/CloudStorage/GoogleDrive-allenchen1113.official@gmail.com/我的雲端硬碟/Showmethemoney/deploy.sh\")",
       "Bash(git -C \"/Users/allenchen/Library/CloudStorage/GoogleDrive-allenchen1113.official@gmail.com/我的雲端硬碟/Showmethemoney\" add deploy.sh)",
-      "Bash(git -C \"/Users/allenchen/Library/CloudStorage/GoogleDrive-allenchen1113.official@gmail.com/我的雲端硬碟/Showmethemoney\" commit -m \"Add deploy script:*)"
+      "Bash(git -C \"/Users/allenchen/Library/CloudStorage/GoogleDrive-allenchen1113.official@gmail.com/我的雲端硬碟/Showmethemoney\" commit -m \"Add deploy script:*)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(/usr/local/bin/node --version)",
+      "Bash(find /usr/local/Cellar/node* -name \"node\" -type f)",
+      "Bash(ls /usr/local/bin/node*)",
+      "Bash(ruby --version)"
     ]
   }
 }

@@ -1403,6 +1403,23 @@ async function fetchPortfolio() {
 }
 
 // ==================== PORTFOLIO NEWS (Google News RSS) ====================
+// 解析 Google News RSS <link>（文字節點在元素後 nextSibling，或 guid）
+function gnLink(item) {
+  try {
+    // Google News RSS: <link/> 後面緊跟文字節點
+    const linkEl = item.getElementsByTagName('link')[0];
+    if (linkEl) {
+      const nv = linkEl.nextSibling?.nodeValue?.trim();
+      if (nv && nv.startsWith('http')) return nv;
+      const tc = linkEl.textContent?.trim();
+      if (tc && tc.startsWith('http')) return tc;
+    }
+  } catch (_) {}
+  // fallback: <guid>
+  const guid = item.querySelector('guid')?.textContent?.trim();
+  return (guid && guid.startsWith('http')) ? guid : '#';
+}
+
 async function fetchPortNews() {
   const el = id('portNews');
   const valid = portfolio.filter(Boolean);
@@ -1412,46 +1429,44 @@ async function fetchPortNews() {
   }
   el.innerHTML = '<div class="loading"><i class="fa-solid fa-circle-notch"></i> 載入中...</div>';
 
+  // 確保中文名稱已填（若從 refreshAll 呼叫則已由 fetchPortfolio 完成）
+  await fetchTwseNames(valid);
+
   const allItems = [];
   const seen = new Set();
 
-  // 以每支股票代號 + 中文名稱組合查詢 Google News RSS
+  // 每支股票查一次 Google News RSS（代號 + 中文名）
   const jobs = valid.slice(0, 10).map(async stock => {
     const cnName = _twseNameCache[stock] || '';
-    const q = cnName ? `${cnName} ${stock}` : stock;
+    const q = cnName ? `${cnName}` : stock;   // 優先用中文名搜尋
     const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant`;
     try {
       const r = await proxyFetch(rssUrl);
       const text = await r.text();
       const xml = new DOMParser().parseFromString(text, 'text/xml');
-      if (xml.querySelector('parsererror')) return [];
-      return Array.from(xml.querySelectorAll('item')).slice(0, 4).map(item => {
-        const link = item.querySelector('link')?.nextSibling?.textContent?.trim()
-                  || item.querySelector('link')?.textContent?.trim() || '#';
-        return {
-          _ticker: stock,
-          _name: cnName || stock,
-          title:     item.querySelector('title')?.textContent?.trim() || '',
-          link,
-          publisher: item.querySelector('source')?.textContent?.trim() || '',
-          pubDate:   item.querySelector('pubDate')?.textContent?.trim() || '',
-          _ts:       new Date(item.querySelector('pubDate')?.textContent || 0).getTime() || 0,
-        };
-      });
+      if (xml.querySelector('parsererror')) throw new Error('parse error');
+      const items = Array.from(xml.getElementsByTagName('item')).slice(0, 4);
+      return items.map(item => ({
+        _ticker: stock,
+        _name:   cnName || stock,
+        title:   item.querySelector('title')?.textContent?.trim() || '',
+        link:    gnLink(item),
+        publisher: item.querySelector('source')?.textContent?.trim() || '',
+        _ts:     new Date(item.querySelector('pubDate')?.textContent || 0).getTime() || 0,
+      })).filter(n => n.title && n.link !== '#');
     } catch (_) { return []; }
   });
 
   const res = await Promise.allSettled(jobs);
   res.forEach(r => { if (r.status === 'fulfilled') allItems.push(...r.value); });
 
-  // 去重 + 依時間排序
   const top = allItems
     .filter(n => { if (!n.title || seen.has(n.title)) return false; seen.add(n.title); return true; })
     .sort((a, b) => b._ts - a._ts)
     .slice(0, 20);
 
   if (!top.length) {
-    el.innerHTML = `<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 暫無相關新聞</div>`;
+    el.innerHTML = `<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 暫無相關新聞<br><small style="color:var(--text3)">請確認自選股已設定</small></div>`;
     return;
   }
 
@@ -1843,11 +1858,11 @@ async function refreshAll() {
   if (btn) { btn.classList.add('spinning'); btn.disabled = true; }
 
   fetchFinCal(); // 同步，不需 await
+  // fetchPortfolio 先跑（填充 _twseNameCache），完成後再跑 fetchPortNews
   await Promise.allSettled([
     fetchTL(),
     fetchMarkets(),
-    fetchPortfolio(),
-    fetchPortNews(),
+    fetchPortfolio().then(() => fetchPortNews()),
     fetchReddit(),
     fetchPTT(),
     fetchFinanceNews(),

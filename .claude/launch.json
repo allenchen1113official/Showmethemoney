@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "showmethemoney",
+      "runtimeExecutable": "/usr/bin/python3",
+      "runtimeArgs": ["/tmp/smtm_serve.py"],
+      "port": 8765
+    }
+  ]
+}
