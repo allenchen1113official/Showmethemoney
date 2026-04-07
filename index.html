@@ -629,9 +629,9 @@
 
 // ==================== CONFIG ====================
 const CFG = {
-  proxyA: 'https://api.allorigins.win/raw?url=',
-  proxyB: 'https://corsproxy.io/?url=',
-  yfQ7:   'https://query1.finance.yahoo.com/v7/finance/quote?symbols=',
+  proxyA: 'https://corsproxy.io/?url=',        // primary
+  proxyB: 'https://api.allorigins.win/raw?url=',// fallback
+  yfChart:'https://query2.finance.yahoo.com/v8/finance/chart/',
   yfSrc:  'https://query1.finance.yahoo.com/v1/finance/search?q=',
   defaultPort: ['2330','2317','2454','2382','2412','6505','1301','2882','2308','3008'],
   refreshMs: 60000,
@@ -698,21 +698,39 @@ async function proxyFetch(url) {
   throw new Error('All proxies failed for: ' + url);
 }
 
+// 單支股票：使用 v8 chart API
+async function yfQuote(symbol) {
+  const url = CFG.yfChart + encodeURIComponent(symbol) + '?interval=1d&range=1d';
+  try {
+    const r = await proxyFetch(url);
+    const d = JSON.parse(await r.text());
+    const meta = d.chart?.result?.[0]?.meta;
+    if (!meta || !meta.regularMarketPrice) return null;
+    const price = meta.regularMarketPrice;
+    const prev  = meta.chartPreviousClose || meta.regularMarketPreviousClose || price;
+    const chg   = price - prev;
+    const pct   = prev ? (chg / prev) * 100 : 0;
+    return {
+      symbol,
+      regularMarketPrice: price,
+      regularMarketChange: chg,
+      regularMarketChangePercent: pct,
+      regularMarketVolume: meta.regularMarketVolume || 0,
+      regularMarketTime: meta.regularMarketTime || 0,
+      shortName: meta.shortName || meta.longName || symbol,
+    };
+  } catch (e) {
+    console.warn('[YF]', symbol, e.message);
+    return null;
+  }
+}
+
+// 批次（並行）
 async function yfQuotes(symbols) {
   const valid = symbols.filter(Boolean);
   if (!valid.length) return [];
-  const url = CFG.yfQ7 + valid.join(',') +
-    '&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,' +
-    'regularMarketVolume,regularMarketPreviousClose,shortName,regularMarketTime&lang=zh-TW';
-  try {
-    const r = await proxyFetch(url);
-    const t = await r.text();
-    const d = JSON.parse(t);
-    return d.quoteResponse?.result || [];
-  } catch (e) {
-    console.warn('[YF] quote fetch failed', e);
-    return [];
-  }
+  const results = await Promise.allSettled(valid.map(s => yfQuote(s)));
+  return results.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
 }
 
 // ==================== TRAFFIC LIGHT ====================
@@ -1111,15 +1129,7 @@ function savePortfolio() {
 }
 
 function bindModalEvents() {
-  id('btnOpenModal').addEventListener('click', openModal);
-  id('btnModalClose').addEventListener('click', closeModal);
-  id('btnModalCancel').addEventListener('click', closeModal);
-  id('btnModalSave').addEventListener('click', savePortfolio);
-  id('overlay').addEventListener('click', e => {
-    if (e.target === id('overlay')) closeModal();
-  });
-  id('refreshBtn').addEventListener('click', refreshAll);
-  // 空白股票格點擊（動態元素用 event delegation）
+  // modal 按鈕已使用 inline onclick，此處只需綁定 portGrid 空格事件委派
   id('portGrid').addEventListener('click', e => {
     if (e.target.closest('.js-open-modal')) openModal();
   });
