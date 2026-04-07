@@ -955,15 +955,38 @@ async function yfQuoteIndex(symbol) {
   }
 }
 
-// 台指期：嘗試 TXF1=F → FITX=F → TWF=F
+// 台指期：主用 TAIFEX MIS API，備用 Yahoo Finance
 async function fetchTaifex() {
-  const candidates = ['TXF1=F', 'FITX=F', 'TWF=F'];
-  for (const sym of candidates) {
-    const q = await yfQuoteIndex(sym);
-    if (q && q.regularMarketPrice) {
-      q.symbol = 'FITX=F'; // 統一 key 方便 renderTW 取用
-      return q;
+  // ① TAIFEX 官方 MIS API（最即時、含夜盤）
+  try {
+    const url = 'https://mis.taifex.com.tw/futures/api/getQuoteList?MarketCode=0&CommodityID=TXF&ContractCode=&ContractMonth=&RowCount=5&PageNo=1&lang=zh-tw';
+    const r = await proxyFetch(url);
+    const d = JSON.parse(await r.text());
+    // 取近月合約（ContractDate 最小 or 第一筆）
+    const list = d.RtnData || d.ItemList || d.Data || [];
+    const item = list.find(i => i.CommodityId === 'TXF' && (i.LastPrice || i.Close)) || list[0];
+    if (item) {
+      const price = parseFloat((item.LastPrice || item.Close || '').replace(/,/g,''));
+      const prev  = parseFloat((item.PreviousClose || item.RefPrice || '0').replace(/,/g,''));
+      const chg   = parseFloat((item.Change || '').replace(/,/g,'')) || (price - prev);
+      const pct   = prev > 0 ? chg / prev * 100 : 0;
+      if (price > 0) return {
+        symbol: 'FITX=F',
+        regularMarketPrice: price,
+        regularMarketChange: chg,
+        regularMarketChangePercent: pct,
+        regularMarketVolume: parseInt((item.Volume || item.TotalVolume || '0').replace(/,/g,'')) || 0,
+        volChgPct: null,
+        regularMarketTime: Math.floor(Date.now() / 1000),
+        shortName: `台指期 ${item.ContractDate || '近月'}`,
+      };
     }
+  } catch (e) { console.warn('[TAIFEX]', e.message); }
+
+  // ② Yahoo Finance 備援（多符號嘗試）
+  for (const sym of ['TXF1=F', 'FITX=F', 'TWF=F', 'TWFUT=F']) {
+    const q = await yfQuoteIndex(sym);
+    if (q && q.regularMarketPrice) { q.symbol = 'FITX=F'; return q; }
   }
   return null;
 }
@@ -1190,22 +1213,51 @@ function renderIntl(qm) {
   id('intlTs').textContent = ref ? fmtTs(ref.regularMarketTime * 1000) : '';
 }
 
-// ==================== TWSE 中文股名快取 ====================
+// ==================== 中文股名快取（TWSE + TPEx）====================
 const _twseNameCache = {};
+const _otcSet = new Set(); // 上櫃股代號集合
+
+function parseName(row) {
+  return row.Name || row.StockName || row['名稱'] || row['股票名稱'] || row['CompanyName'] || row['公司名稱'] || '';
+}
 
 async function fetchTwseNames(stocks) {
   const toFetch = stocks.filter(s => s && !_twseNameCache[s]);
   if (!toFetch.length) return;
+
+  const needOtc = [];
+
+  // ① TWSE 上市
   await Promise.allSettled(toFetch.map(async s => {
     try {
       const url = `https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY?stockNo=${s}`;
       const r = await proxyFetch(url);
       const rows = JSON.parse(await r.text());
       if (Array.isArray(rows) && rows.length) {
-        _twseNameCache[s] = rows[0].StockName || rows[0].Name || s;
+        const name = parseName(rows[0]);
+        if (name) { _twseNameCache[s] = name; return; }
       }
     } catch (_) {}
+    needOtc.push(s); // TWSE 無資料 → 上櫃
   }));
+
+  if (!needOtc.length) return;
+  needOtc.forEach(s => _otcSet.add(s));
+
+  // ② TPEx 上櫃：批次取全部上櫃報價（含股名），一次解決
+  try {
+    const r = await proxyFetch('https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes');
+    const rows = JSON.parse(await r.text());
+    if (Array.isArray(rows)) {
+      rows.forEach(row => {
+        const code = row.SecuritiesCompanyCode || row.Code || row['代號'];
+        if (code && needOtc.includes(code) && !_twseNameCache[code]) {
+          const name = parseName(row) || row.SecuritiesCompanyName || row['公司名稱'];
+          if (name) _twseNameCache[code] = name;
+        }
+      });
+    }
+  } catch (e) { console.warn('[TPEx names]', e.message); }
 }
 
 // ==================== PORTFOLIO ====================
@@ -1225,14 +1277,37 @@ async function fetchPortfolio() {
       <div class="s-price neu" style="font-size:.9rem">載入中</div>
     </div>`).join('');
 
-  // 並行取得：YF 股價 + TWSE 中文名稱
-  const syms = valid.map(s => s + '.TW');
-  const [quotes] = await Promise.all([
-    yfQuotes(syms),
-    fetchTwseNames(valid),
-  ]);
+  // ① 先取中文股名（決定哪些是上櫃）
+  await fetchTwseNames(valid);
+
+  // ② 依股票類型選擇 suffix：上櫃用 .TWO，上市用 .TW
+  //    對於不確定的股票，同時嘗試兩個 suffix
+  const twseSyms = valid.filter(s => !_otcSet.has(s)).map(s => s + '.TW');
+  const otcSyms  = valid.filter(s => _otcSet.has(s)).map(s => s + '.TWO');
+  // 還未確定的（第一次載入，_otcSet 還未更新）先用 .TW，失敗後補 .TWO
+  const allSyms = [...new Set([...twseSyms, ...otcSyms])];
+
+  const quotes = await yfQuotes(allSyms);
   const qm = {};
-  quotes.forEach(q => { qm[q.symbol.replace('.TW','').replace('.TWO','')] = q; });
+  quotes.forEach(q => {
+    const code = q.symbol.replace(/\.TW$/, '').replace(/\.TWO$/, '');
+    if (!qm[code]) qm[code] = q; // 已有資料的不覆蓋
+    if (q.symbol.endsWith('.TWO')) _otcSet.add(code);
+  });
+
+  // 補查：.TW 失敗的且非 OTC，嘗試 .TWO
+  const missing = valid.filter(s => !qm[s]);
+  if (missing.length) {
+    const fallbackSyms = missing.map(s => s + '.TWO');
+    const fb = await yfQuotes(fallbackSyms);
+    fb.forEach(q => {
+      const code = q.symbol.replace('.TWO','');
+      qm[code] = q;
+      _otcSet.add(code);
+    });
+    // 補抓名稱
+    await fetchTwseNames(missing);
+  }
 
   el.innerHTML = portfolio.map((stock, i) => {
     if (!stock) return `
@@ -1252,8 +1327,8 @@ async function fetchPortfolio() {
     const dir = ch > 0 ? 'up' : ch < 0 ? 'down' : 'neu';
     const arr = ch > 0 ? '▲' : ch < 0 ? '▼' : '─';
     const cls = ch > 0 ? 'up-card' : ch < 0 ? 'down-card' : '';
-    // 中文股名（優先 TWSE，備用 YF shortName）
-    const cnName = _twseNameCache[stock] || q.shortName || stock;
+    // 中文股名（優先 TWSE/TPEx，備用 YF shortName，最後用代號）
+    const cnName = _twseNameCache[stock] || (q.shortName && !/^\d/.test(q.shortName) ? q.shortName : null) || stock;
     // 量增減百分比
     let volChgHtml = '';
     if (q.volChgPct !== null && q.volChgPct !== undefined) {
