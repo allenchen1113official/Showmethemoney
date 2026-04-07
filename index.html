@@ -926,6 +926,48 @@ async function yfQuotes(symbols) {
   return results.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
 }
 
+// 指數 / 期貨專用：使用 meta 內建的 change/percent（最準確），不自行計算
+async function yfQuoteIndex(symbol) {
+  const url = CFG.yfChart + encodeURIComponent(symbol) + '?interval=1d&range=2d';
+  try {
+    const r = await proxyFetch(url);
+    const d = JSON.parse(await r.text());
+    const result = d.chart?.result?.[0];
+    const meta   = result?.meta;
+    if (!meta || !meta.regularMarketPrice) return null;
+    const price = meta.regularMarketPrice;
+    // 優先使用 Yahoo 內建計算值，避免跨日 prev 不準
+    const chg   = meta.regularMarketChange       ?? (price - (meta.chartPreviousClose || meta.regularMarketPreviousClose || price));
+    const pct   = meta.regularMarketChangePercent ?? (meta.chartPreviousClose ? chg / meta.chartPreviousClose * 100 : 0);
+    return {
+      symbol,
+      regularMarketPrice: price,
+      regularMarketChange: chg,
+      regularMarketChangePercent: pct,
+      regularMarketVolume: meta.regularMarketVolume || 0,
+      volChgPct: null,
+      regularMarketTime: meta.regularMarketTime || 0,
+      shortName: meta.shortName || meta.longName || symbol,
+    };
+  } catch (e) {
+    console.warn('[YF-IDX]', symbol, e.message);
+    return null;
+  }
+}
+
+// 台指期：嘗試 TXF1=F → FITX=F → TWF=F
+async function fetchTaifex() {
+  const candidates = ['TXF1=F', 'FITX=F', 'TWF=F'];
+  for (const sym of candidates) {
+    const q = await yfQuoteIndex(sym);
+    if (q && q.regularMarketPrice) {
+      q.symbol = 'FITX=F'; // 統一 key 方便 renderTW 取用
+      return q;
+    }
+  }
+  return null;
+}
+
 // ==================== TRAFFIC LIGHT ====================
 async function fetchTL() {
   const el = id('tlContent');
@@ -991,13 +1033,16 @@ function tlHTML(type, score, month) {
 
 // ==================== MARKET INDICES ====================
 async function fetchMarkets() {
-  const twSyms  = ['^TWII', 'FITX=F'];
-  const intSyms = ['^N225', '^KS11', '^DJI', '^GSPC', '^IXIC'];
-  const [all] = await Promise.all([
-    yfQuotes([...twSyms, ...intSyms]),
+  const intSyms = ['^TWII', '^N225', '^KS11', '^DJI', '^GSPC', '^IXIC'];
+  // 指數 + 台指期 + 三大法人 並行
+  const [idxResults, fut] = await Promise.all([
+    Promise.allSettled(intSyms.map(s => yfQuoteIndex(s))),
+    fetchTaifex(),
     fetchInstitutional(),
   ]);
-  const qm = Object.fromEntries(all.map(q => [q.symbol, q]));
+  const qm = {};
+  idxResults.forEach(r => { if (r.status === 'fulfilled' && r.value) qm[r.value.symbol] = r.value; });
+  if (fut) qm['FITX=F'] = fut;
   renderTW(qm);
   renderIntl(qm);
 }
