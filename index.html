@@ -837,24 +837,34 @@ async function proxyFetch(url) {
   throw new Error('All proxies failed for: ' + url);
 }
 
-// 單支股票：使用 v8 chart API
+// 單支股票：使用 v8 chart API（range=5d 以取得前一日成交量作比較）
 async function yfQuote(symbol) {
-  const url = CFG.yfChart + encodeURIComponent(symbol) + '?interval=1d&range=1d';
+  const url = CFG.yfChart + encodeURIComponent(symbol) + '?interval=1d&range=5d';
   try {
     const r = await proxyFetch(url);
     const d = JSON.parse(await r.text());
-    const meta = d.chart?.result?.[0]?.meta;
+    const result = d.chart?.result?.[0];
+    const meta   = result?.meta;
     if (!meta || !meta.regularMarketPrice) return null;
     const price = meta.regularMarketPrice;
     const prev  = meta.chartPreviousClose || meta.regularMarketPreviousClose || price;
     const chg   = price - prev;
     const pct   = prev ? (chg / prev) * 100 : 0;
+
+    // 從 indicators 取各日成交量，計算量增減百分比
+    const vols      = (result?.indicators?.quote?.[0]?.volume || []).filter(v => v != null && v > 0);
+    const todayVol  = meta.regularMarketVolume || (vols[vols.length - 1] || 0);
+    const prevVol   = vols.length >= 2 ? vols[vols.length - 2] : 0;
+    const volChgPct = prevVol > 0 ? ((todayVol - prevVol) / prevVol) * 100 : null;
+
     return {
       symbol,
       regularMarketPrice: price,
       regularMarketChange: chg,
       regularMarketChangePercent: pct,
-      regularMarketVolume: meta.regularMarketVolume || 0,
+      regularMarketVolume: todayVol,
+      prevVolume: prevVol,
+      volChgPct,
       regularMarketTime: meta.regularMarketTime || 0,
       shortName: meta.shortName || meta.longName || symbol,
     };
@@ -997,6 +1007,24 @@ function renderIntl(qm) {
   id('intlTs').textContent = ref ? fmtTs(ref.regularMarketTime * 1000) : '';
 }
 
+// ==================== TWSE 中文股名快取 ====================
+const _twseNameCache = {};
+
+async function fetchTwseNames(stocks) {
+  const toFetch = stocks.filter(s => s && !_twseNameCache[s]);
+  if (!toFetch.length) return;
+  await Promise.allSettled(toFetch.map(async s => {
+    try {
+      const url = `https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY?stockNo=${s}`;
+      const r = await proxyFetch(url);
+      const rows = JSON.parse(await r.text());
+      if (Array.isArray(rows) && rows.length) {
+        _twseNameCache[s] = rows[0].StockName || rows[0].Name || s;
+      }
+    } catch (_) {}
+  }));
+}
+
 // ==================== PORTFOLIO ====================
 async function fetchPortfolio() {
   const el = id('portGrid');
@@ -1014,8 +1042,12 @@ async function fetchPortfolio() {
       <div class="s-price neu" style="font-size:.9rem">載入中</div>
     </div>`).join('');
 
+  // 並行取得：YF 股價 + TWSE 中文名稱
   const syms = valid.map(s => s + '.TW');
-  const quotes = await yfQuotes(syms);
+  const [quotes] = await Promise.all([
+    yfQuotes(syms),
+    fetchTwseNames(valid),
+  ]);
   const qm = {};
   quotes.forEach(q => { qm[q.symbol.replace('.TW','').replace('.TWO','')] = q; });
 
@@ -1033,17 +1065,26 @@ async function fetchPortfolio() {
         <div class="s-name">查無資料</div>
         <div class="s-price neu">--</div>
       </div>`;
-    const ch = q.regularMarketChange, pct = q.regularMarketChangePercent;
+    const ch  = q.regularMarketChange, pct = q.regularMarketChangePercent;
     const dir = ch > 0 ? 'up' : ch < 0 ? 'down' : 'neu';
     const arr = ch > 0 ? '▲' : ch < 0 ? '▼' : '─';
     const cls = ch > 0 ? 'up-card' : ch < 0 ? 'down-card' : '';
+    // 中文股名（優先 TWSE，備用 YF shortName）
+    const cnName = _twseNameCache[stock] || q.shortName || stock;
+    // 量增減百分比
+    let volChgHtml = '';
+    if (q.volChgPct !== null && q.volChgPct !== undefined) {
+      const vd  = q.volChgPct > 0 ? 'up' : q.volChgPct < 0 ? 'down' : 'neu';
+      const va  = q.volChgPct > 0 ? '▲' : q.volChgPct < 0 ? '▼' : '─';
+      volChgHtml = `<span class="${vd}" style="font-size:.62rem;margin-left:.3rem">${va}${Math.abs(q.volChgPct).toFixed(1)}%</span>`;
+    }
     return `
       <div class="stock-card ${cls}">
         <div class="s-code">${esc(stock)}</div>
-        <div class="s-name" title="${esc(q.shortName||'')} ">${esc(q.shortName || stock)}</div>
+        <div class="s-name" title="${esc(cnName)}">${esc(cnName)}</div>
         <div class="s-price ${dir}">${fmtN(q.regularMarketPrice, 2)}</div>
         <div class="s-chg ${dir}">${arr} ${Math.abs(ch).toFixed(2)} (${pct>0?'+':''}${pct.toFixed(2)}%)</div>
-        <div class="s-vol">量 ${fmtVol(q.regularMarketVolume)}</div>
+        <div class="s-vol">量 ${fmtVol(q.regularMarketVolume)}${volChgHtml}</div>
       </div>`;
   }).join('');
 }
@@ -1212,6 +1253,27 @@ function fetchFinCal() {
   }).join('');
 }
 
+// ==================== 翻譯工具（Google Translate 免費端點）====================
+async function translateZhTW(text) {
+  if (!text) return text;
+  // 若已含中文字則不翻譯
+  if (/[\u4e00-\u9fff]/.test(text)) return text;
+  try {
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-TW&dt=t&q=${encodeURIComponent(text)}`;
+    const r = await fetch(url, { signal: AbortSignal.timeout(6000) });
+    const d = await r.json();
+    return (d[0] || []).map(s => s[0] || '').join('') || text;
+  } catch (_) {
+    // fallback via proxy
+    try {
+      const url2 = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-TW&dt=t&q=${encodeURIComponent(text)}`;
+      const r2 = await proxyFetch(url2);
+      const d2 = JSON.parse(await r2.text());
+      return (d2[0] || []).map(s => s[0] || '').join('') || text;
+    } catch (__) { return text; }
+  }
+}
+
 // ==================== REDDIT ====================
 async function fetchReddit() {
   const el = id('redditContent');
@@ -1249,10 +1311,16 @@ async function fetchReddit() {
     .sort((a, b) => b.ups - a.ups)
     .slice(0, 5);
 
-  el.innerHTML = top.map((p, i) => `
+  // 並行翻譯所有標題為繁體中文
+  const translated = await Promise.allSettled(top.map(p => translateZhTW(p.title)));
+
+  el.innerHTML = top.map((p, i) => {
+    const zhTitle = translated[i]?.status === 'fulfilled' ? translated[i].value : p.title;
+    return `
     <div class="reddit-item">
       <a href="https://reddit.com${p.permalink}" target="_blank" rel="noopener">
-        <div class="reddit-title">${esc(p.title)}</div>
+        <div class="reddit-title">${esc(zhTitle)}</div>
+        ${zhTitle !== p.title ? `<div style="font-size:.62rem;color:var(--text3);margin-top:.15rem">${esc(p.title)}</div>` : ''}
       </a>
       <div class="reddit-meta">
         <span class="r-ups"><i class="fa-solid fa-arrow-up"></i> ${fmtK(p.ups)}</span>
@@ -1260,7 +1328,8 @@ async function fetchReddit() {
         <span class="tag tag-reddit">r/${p._sub}</span>
         <span class="ntime">${ago(p.created_utc * 1000)}</span>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 // ==================== PTT (Atom format) ====================
@@ -1381,7 +1450,7 @@ async function fetchFinanceNews() {
       const r = await proxyFetch('https://tw.news.yahoo.com/rss/finance');
       const text = await r.text();
       const xml = new DOMParser().parseFromString(text, 'text/xml');
-      Array.from(xml.querySelectorAll('item')).slice(0, 10).forEach(item => {
+      Array.from(xml.querySelectorAll('item')).slice(0, 5).forEach(item => {
         allItems.push({
           title:     item.querySelector('title')?.textContent?.trim() || '',
           link:      item.querySelector('link')?.nextSibling?.textContent?.trim()
@@ -1404,7 +1473,7 @@ async function fetchFinanceNews() {
   const top = allItems
     .filter(n => { if (!n.title || seen.has(n.title)) return false; seen.add(n.title); return true; })
     .sort((a, b) => b._ts - a._ts)
-    .slice(0, 10);
+    .slice(0, 5);
 
   const html = top.map((n, i) => {
     const rankCls = i === 0 ? 'gold' : i === 1 ? 'silver' : i === 2 ? 'bronze' : '';
