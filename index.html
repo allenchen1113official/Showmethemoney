@@ -288,6 +288,49 @@
     .s-chg { font-size: 0.72rem; font-variant-numeric: tabular-nums; }
     .s-vol { font-size: 0.62rem; color: var(--text3); margin-top: 0.15rem; }
 
+    /* ===== INSTITUTIONAL ===== */
+    .inst-hd {
+      font-size: 0.72rem;
+      font-weight: 600;
+      color: var(--text2);
+      margin: 0.6rem 0 0.35rem;
+      padding-top: 0.55rem;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+    }
+    .inst-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.22rem 0;
+      font-size: 0.72rem;
+      border-bottom: 1px solid rgba(255,255,255,.03);
+    }
+    .inst-row:last-child { border-bottom: none; }
+    .inst-label { color: var(--text2); }
+    .inst-val { font-variant-numeric: tabular-nums; font-weight: 600; }
+    .inst-total { color: var(--warn); font-weight: 700; }
+    .mkt-vol-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.22rem 0;
+      font-size: 0.72rem;
+      border-bottom: 1px solid rgba(255,255,255,.03);
+    }
+    .night-badge {
+      font-size: 0.6rem;
+      background: rgba(255,215,0,.15);
+      color: #ffd700;
+      border: 1px solid rgba(255,215,0,.3);
+      border-radius: 3px;
+      padding: 0.05rem 0.3rem;
+      margin-left: 0.3rem;
+      vertical-align: middle;
+    }
+
     /* ===== NEWS ITEMS ===== */
     .news-item {
       padding: 0.6rem 0;
@@ -624,6 +667,7 @@
       </div>
       <div class="card-bd">
         <div id="twMkt" class="loading"><i class="fa-solid fa-circle-notch"></i> 載入中...</div>
+        <div id="instContent"></div>
       </div>
     </div>
 
@@ -684,7 +728,7 @@
   <div class="right-col">
     <div class="card" style="margin-bottom:0">
       <div class="card-hd">
-        <div class="card-title"><i class="fa-solid fa-fire"></i> 財經熱門 Top 10</div>
+        <div class="card-title"><i class="fa-solid fa-fire"></i> 財經熱門 Top 5</div>
       </div>
       <div class="tabs">
         <div class="tab active" onclick="switchTab(this,'paneReddit')">
@@ -949,11 +993,71 @@ function tlHTML(type, score, month) {
 async function fetchMarkets() {
   const twSyms  = ['^TWII', 'FITX=F'];
   const intSyms = ['^N225', '^KS11', '^DJI', '^GSPC', '^IXIC'];
-  const all = await yfQuotes([...twSyms, ...intSyms]);
+  const [all] = await Promise.all([
+    yfQuotes([...twSyms, ...intSyms]),
+    fetchInstitutional(),
+  ]);
   const qm = Object.fromEntries(all.map(q => [q.symbol, q]));
-
   renderTW(qm);
   renderIntl(qm);
+}
+
+// ==================== 三大法人買賣超 ====================
+async function fetchInstitutional() {
+  const el = id('instContent');
+  if (!el) return;
+  try {
+    // TWSE BFI82U: 三大法人買賣超彙總（外資、投信、自營商）
+    const url = 'https://www.twse.com.tw/rwd/zh/fund/BFI82U?dayDate=&type=day&response=json';
+    const r = await proxyFetch(url);
+    const d = JSON.parse(await r.text());
+    const rows = d.data || [];
+    if (!rows.length) throw new Error('empty');
+
+    // BFI82U 欄位: [類別, 買進金額, 賣出金額, 買賣差額]
+    const labels = { '自營商': '自營商', '投信': '投信', '外資及陸資': '外資' };
+    let html = `<div class="inst-hd"><i class="fa-solid fa-building-columns" style="color:var(--warn)"></i> 三大法人買賣超（億元）</div>`;
+
+    rows.forEach(row => {
+      const cat = row[0]?.trim();
+      if (!cat) return;
+      const netRaw = (row[3] || '0').replace(/,/g, '');
+      const net = parseFloat(netRaw) || 0;
+      const netB = (net / 1e8).toFixed(2);
+      const dir = net > 0 ? 'up' : net < 0 ? 'down' : 'neu';
+      const arr = net > 0 ? '▲' : net < 0 ? '▼' : '─';
+      const isTotal = cat.includes('合計');
+      const label = labels[cat] || cat;
+      html += `<div class="inst-row">
+        <span class="inst-label ${isTotal ? 'inst-total' : ''}">${isTotal ? '三大合計' : label}</span>
+        <span class="inst-val ${dir} ${isTotal ? 'inst-total' : ''}">${arr} ${Math.abs(parseFloat(netB)).toFixed(2)} 億</span>
+      </div>`;
+    });
+
+    // 加全市場成交值
+    try {
+      const url2 = 'https://openapi.twse.com.tw/v1/exchangeReport/FMTQIK';
+      const r2 = await proxyFetch(url2);
+      const rows2 = JSON.parse(await r2.text());
+      if (Array.isArray(rows2) && rows2.length) {
+        const last = rows2[rows2.length - 1];
+        const val  = last['成交金額'] || last['tradeValue'] || '';
+        const vol  = last['成交股數'] || last['tradeVolume'] || '';
+        const date = last['日期'] || last['date'] || '';
+        if (val) {
+          const valB = (parseFloat(val.replace(/,/g,'')) / 1e8).toFixed(0);
+          html += `<div class="inst-hd"><i class="fa-solid fa-coins" style="color:var(--blue)"></i> 大盤成交（${date}）</div>`;
+          html += `<div class="mkt-vol-row"><span class="inst-label">成交值</span><span class="inst-val" style="color:var(--blue)">${valB} 億元</span></div>`;
+          if (vol) html += `<div class="mkt-vol-row"><span class="inst-label">成交量</span><span class="inst-val">${fmtVol(parseInt(vol.replace(/,/g,'')))} 股</span></div>`;
+        }
+      }
+    } catch (_) {}
+
+    el.innerHTML = html;
+  } catch (e) {
+    console.warn('[Inst]', e.message);
+    el.innerHTML = `<div class="inst-hd" style="color:var(--text3)"><i class="fa-solid fa-circle-exclamation"></i> 三大法人資料暫無法取得</div>`;
+  }
 }
 
 function mktItem(q, flag, name, sub) {
@@ -987,10 +1091,44 @@ function mktItem(q, flag, name, sub) {
 function renderTW(qm) {
   const el = id('twMkt');
   const taiex = qm['^TWII'], fut = qm['FITX=F'];
+  // 判斷台指期是否為夜盤（台灣時間 15:30–05:00 為夜盤區間）
+  const now = new Date();
+  const twHour = parseInt(now.toLocaleString('en-US', { hour: '2-digit', hour12: false, timeZone: 'Asia/Taipei' }));
+  const isNight = twHour >= 15 || twHour < 5;
+  const futLabel = isNight ? '台指期<span class="night-badge">夜盤</span>' : '台指期';
   el.innerHTML =
     mktItem(taiex, '🇹🇼', '台灣加權指數', 'TAIEX') +
-    mktItem(fut,   '📊',  '台指期貨近月', 'FITX');
+    mktItemLabel(fut, '📊', futLabel, 'FITX');
   id('twTs').textContent = taiex ? fmtTs(taiex.regularMarketTime * 1000) : '';
+}
+
+// mktItem 支援 HTML label 版本
+function mktItemLabel(q, flag, nameHtml, sub) {
+  if (!q) return `
+    <div class="mkt-item">
+      <div class="mkt-left">
+        <span class="mkt-flag">${flag}</span>
+        <div><div class="mkt-name">${nameHtml}</div><div class="mkt-sub">${sub}</div></div>
+      </div>
+      <div class="mkt-right">
+        <div class="mkt-price neu">--</div>
+        <div class="mkt-chg neu">暫無資料</div>
+      </div>
+    </div>`;
+  const p = q.regularMarketPrice, ch = q.regularMarketChange, pct = q.regularMarketChangePercent;
+  const dir = ch > 0 ? 'up' : ch < 0 ? 'down' : 'neu';
+  const arr = ch > 0 ? '▲' : ch < 0 ? '▼' : '─';
+  return `
+    <div class="mkt-item">
+      <div class="mkt-left">
+        <span class="mkt-flag">${flag}</span>
+        <div><div class="mkt-name">${nameHtml}</div><div class="mkt-sub">${sub}</div></div>
+      </div>
+      <div class="mkt-right">
+        <div class="mkt-price ${dir}">${fmtN(p)}</div>
+        <div class="mkt-chg ${dir}">${arr} ${Math.abs(ch).toFixed(2)} (${pct > 0 ? '+' : ''}${pct.toFixed(2)}%)</div>
+      </div>
+    </div>`;
 }
 
 function renderIntl(qm) {
@@ -1089,7 +1227,7 @@ async function fetchPortfolio() {
   }).join('');
 }
 
-// ==================== PORTFOLIO NEWS (TWSE OpenAPI) ====================
+// ==================== PORTFOLIO NEWS (Google News RSS) ====================
 async function fetchPortNews() {
   const el = id('portNews');
   const valid = portfolio.filter(Boolean);
@@ -1100,68 +1238,57 @@ async function fetchPortNews() {
   el.innerHTML = '<div class="loading"><i class="fa-solid fa-circle-notch"></i> 載入中...</div>';
 
   const allItems = [];
+  const seen = new Set();
 
-  // ① TWSE OpenAPI - 個股當日收盤資訊（最近交易日）
-  const twseJobs = valid.slice(0, 10).map(async stock => {
+  // 以每支股票代號 + 中文名稱組合查詢 Google News RSS
+  const jobs = valid.slice(0, 10).map(async stock => {
+    const cnName = _twseNameCache[stock] || '';
+    const q = cnName ? `${cnName} ${stock}` : stock;
+    const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant`;
     try {
-      const url = `https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY?stockNo=${stock}`;
-      const r = await proxyFetch(url);
-      const rows = JSON.parse(await r.text());
-      if (!Array.isArray(rows) || !rows.length) return [];
-      const latest = rows[rows.length - 1];
-      return [{
-        _ticker: stock,
-        title: `${stock} ${latest['股票名稱']||''} — 收盤 ${latest['收盤價']||'–'} 元，成交量 ${latest['成交股數']||'–'} 股`,
-        link: `https://www.twse.com.tw/zh/trading/historical/stock-day.html`,
-        time: latest['日期'] || '',
-        src: 'TWSE',
-      }];
+      const r = await proxyFetch(rssUrl);
+      const text = await r.text();
+      const xml = new DOMParser().parseFromString(text, 'text/xml');
+      if (xml.querySelector('parsererror')) return [];
+      return Array.from(xml.querySelectorAll('item')).slice(0, 4).map(item => {
+        const link = item.querySelector('link')?.nextSibling?.textContent?.trim()
+                  || item.querySelector('link')?.textContent?.trim() || '#';
+        return {
+          _ticker: stock,
+          _name: cnName || stock,
+          title:     item.querySelector('title')?.textContent?.trim() || '',
+          link,
+          publisher: item.querySelector('source')?.textContent?.trim() || '',
+          pubDate:   item.querySelector('pubDate')?.textContent?.trim() || '',
+          _ts:       new Date(item.querySelector('pubDate')?.textContent || 0).getTime() || 0,
+        };
+      });
     } catch (_) { return []; }
   });
 
-  // ② TWSE OpenAPI - 上市公司重大訊息（全市場最新）
-  const annoJob = (async () => {
-    try {
-      const today = new Date();
-      const ds = `${today.getFullYear()}${String(today.getMonth()+1).padStart(2,'0')}${String(today.getDate()).padStart(2,'0')}`;
-      const url = `https://openapi.twse.com.tw/v1/announcement/queryMajorAnnouncement?date=${ds}`;
-      const r = await proxyFetch(url);
-      const rows = JSON.parse(await r.text());
-      if (!Array.isArray(rows)) return [];
-      return rows
-        .filter(row => valid.includes(row['公司代號'] || row['stockNo'] || ''))
-        .map(row => ({
-          _ticker: row['公司代號'] || row['stockNo'] || '',
-          title: row['主旨'] || row['subject'] || row['title'] || JSON.stringify(row).substring(0, 80),
-          link: `https://mops.twse.com.tw/mops/web/t05sr01_1?co_id=${row['公司代號']||''}`,
-          time: row['發言日期'] || row['date'] || '',
-          src: 'TWSE重大訊息',
-        }));
-    } catch (_) { return []; }
-  })();
+  const res = await Promise.allSettled(jobs);
+  res.forEach(r => { if (r.status === 'fulfilled') allItems.push(...r.value); });
 
-  const all = await Promise.allSettled([...twseJobs, annoJob]);
-  all.forEach(r => { if (r.status === 'fulfilled') allItems.push(...r.value); });
+  // 去重 + 依時間排序
+  const top = allItems
+    .filter(n => { if (!n.title || seen.has(n.title)) return false; seen.add(n.title); return true; })
+    .sort((a, b) => b._ts - a._ts)
+    .slice(0, 20);
 
-  if (!allItems.length) {
-    el.innerHTML = `<div class="err">
-      <i class="fa-solid fa-triangle-exclamation"></i> 暫無資料
-      <div style="margin-top:.4rem">
-        <a href="https://openapi.twse.com.tw/" target="_blank" style="color:var(--blue)">TWSE OpenAPI</a>
-      </div>
-    </div>`;
+  if (!top.length) {
+    el.innerHTML = `<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 暫無相關新聞</div>`;
     return;
   }
 
-  el.innerHTML = allItems.slice(0, 20).map(n => `
+  el.innerHTML = top.map(n => `
     <div class="pn-item">
-      <a href="${n.link||'#'}" target="_blank" rel="noopener">
-        <div class="pn-title">${esc(n.title||'')}</div>
+      <a href="${n.link}" target="_blank" rel="noopener">
+        <div class="pn-title">${esc(n.title)}</div>
       </a>
       <div class="pn-meta">
-        <span class="tag tag-ticker">${esc(n._ticker)}</span>
-        <span class="ntime">${esc(n.src||'')}</span>
-        <span class="ntime">${esc(n.time||'')}</span>
+        <span class="tag tag-ticker">${esc(n._ticker)}${n._name && n._name !== n._ticker ? ' ' + esc(n._name) : ''}</span>
+        ${n.publisher ? `<span class="ntime">${esc(n.publisher)}</span>` : ''}
+        <span class="ntime">${n._ts ? ago(n._ts) : ''}</span>
       </div>
     </div>`).join('');
 
