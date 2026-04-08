@@ -1003,16 +1003,29 @@ async function fetchTaifex() {
     } catch (_) {}
   }
 
-  // ② TAIFEX MIS API（日盤 MarketCode=0，夜盤 MarketCode=1）
+  // ② TAIFEX MIS API（日盤 MarketCode=0，夜盤 MarketCode=1，需 POST）
   for (const [mc, label] of [['0','台指期'],['1','台指期（夜盤）']]) {
     try {
-      const url = `https://mis.taifex.com.tw/futures/api/getQuoteList?MarketCode=${mc}&CommodityID=TXF&ContractCode=&ContractMonth=&RowCount=5&PageNo=1&lang=zh-tw`;
-      const r   = await proxyFetch(url);
+      const r = await fetch('https://mis.taifex.com.tw/futures/api/getQuoteList', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ MarketCode: mc, CommodityID: 'TXF', RowCount: 10, PageNo: 1 }),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!r.ok) continue;
       const d   = JSON.parse(await r.text());
-      const list = (d.RtnData || d.Data || []);
-      const item = list.find(i => (i.CommodityId||i.CommodityID||'').includes('TXF')) || list[0];
+      const list = (d.RtData || d.RtnData || d.Data || {}).QuoteList || [];
+      const item = list.find(i => {
+        const sid = i.SymbolID || i.CommodityId || i.CommodityID || '';
+        return sid.startsWith('TXF') && sid.includes('-F');
+      }) || list.find(i => (i.SymbolID||'').startsWith('TXF'));
       if (!item) continue;
-      const parsed = parseFutPrice(item);
+      const parsed = parseFutPrice({
+        ClosingPrice: item.CLastPrice || item.SettlementPrice,
+        ReferencePrice: item.CRefPrice,
+        Change: item.CDiff,
+        Volume: item.CTotalVolume,
+      });
       if (parsed) return mkResult(parsed, label);
     } catch (_) {}
   }
@@ -1112,24 +1125,15 @@ async function fetchTpexIndex() {
     }
   } catch (_) {}
 
-  // ② TPEx OpenAPI 統計月報（含前日指數）
-  try {
-    const r = await proxyFetch('https://www.tpex.org.tw/openapi/v1/tpex_mainboard_summary');
-    const rows = JSON.parse(await r.text());
-    if (Array.isArray(rows) && rows.length) {
-      const last = rows[rows.length - 1];
-      const n = s => parseFloat(String(s||'').replace(/,/g,'')) || 0;
-      const price = n(last.ClosingIndex) || n(last.Index) || n(last['指數']);
-      const prev  = n(last.PreviousIndex) || n(last['前日指數']);
-      if (price > 0) return mkQ(price, price - prev, prev > 0 ? (price - prev)/prev*100 : 0);
-    }
-  } catch (_) {}
+  // ② Yahoo Finance ^TWO（TPEx 加權指數，Yahoo 有效符號）
+  const q2 = await yfQuoteIndex('^TWO');
+  if (q2 && q2.regularMarketPrice) { q2.symbol = '^TPEX'; q2.shortName = '櫃買指數'; return q2; }
 
-  // ③ Yahoo Finance ^TPEX（有時有效）
-  const q = await yfQuoteIndex('^TPEX');
-  if (q && q.regularMarketPrice) return q;
+  // ③ Yahoo Finance ^TPEX（備援）
+  const q3 = await yfQuoteIndex('^TPEX');
+  if (q3 && q3.regularMarketPrice) return q3;
 
-  // ④ TPEx 即時報價頁面 JSON
+  // ④ TPEx 即時報價頁面 JSON（透過 proxy）
   try {
     const r = await proxyFetch('https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php?l=zh-tw&o=json&d=&se=EW&s=0,asc,0&_=1');
     const d = JSON.parse(await r.text());
@@ -1183,15 +1187,29 @@ async function fetchTxfNear() {
     }
   } catch (_) {}
 
-  // ③ TAIFEX MIS（日盤即時）
+  // ③ TAIFEX MIS（日盤即時，需 POST）
   try {
     for (const mc of ['0', '1']) {
-      const r = await proxyFetch(`https://mis.taifex.com.tw/futures/api/getQuoteList?MarketCode=${mc}&CommodityID=TXF&RowCount=5&PageNo=1&lang=zh-tw`);
+      const r = await fetch('https://mis.taifex.com.tw/futures/api/getQuoteList', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ MarketCode: mc, CommodityID: 'TXF', RowCount: 10, PageNo: 1 }),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!r.ok) continue;
       const d = JSON.parse(await r.text());
-      const list = d.RtnData || d.Data || [];
-      const item = list.find(i => (i.CommodityId||i.CommodityID||'').startsWith('TXF')) || list[0];
+      const list = (d.RtData || d.RtnData || d.Data || {}).QuoteList || [];
+      const item = list.find(i => {
+        const sid = i.SymbolID || i.CommodityId || i.CommodityID || '';
+        return sid.startsWith('TXF') && sid.includes('-F');
+      }) || list.find(i => (i.SymbolID || '').startsWith('TXF'));
       if (item) {
-        const parsed = parseFutPrice(item);
+        const parsed = parseFutPrice({
+          ClosingPrice: item.CLastPrice || item.SettlementPrice,
+          ReferencePrice: item.CRefPrice,
+          Change: item.CDiff,        // CDiff = CLastPrice - CRefPrice
+          Volume: item.CTotalVolume,
+        });
         if (parsed && parsed.price > 0) return mkQ(parsed);
       }
     }
@@ -1922,10 +1940,7 @@ async function fetchPTT() {
   }
 
   try {
-    const r = await fetch(
-      CFG.proxyA + encodeURIComponent('http://rss.ptt.cc/Stock.xml'),
-      { signal: AbortSignal.timeout(10000) }
-    );
+    const r = await proxyFetch('http://rss.ptt.cc/Stock.xml');
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const text = await r.text();
 
