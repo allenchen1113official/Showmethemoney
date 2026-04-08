@@ -788,9 +788,10 @@
 
 // ==================== CONFIG ====================
 const CFG = {
-  proxyA: 'https://corsproxy.io/?url=',        // primary
-  proxyB: 'https://api.allorigins.win/raw?url=',// fallback
-  yfChart:'https://query2.finance.yahoo.com/v8/finance/chart/',
+  proxyA: 'https://api.cors.lol/?url=',                    // primary (CORS-enabled, free)
+  proxyB: 'https://api.codetabs.com/v1/proxy/?quest=',     // fallback (good for Taiwan APIs)
+  proxyC: 'https://corsproxy.io/?url=',                    // tertiary (legacy)
+  yfChart:'https://query1.finance.yahoo.com/v8/finance/chart/',
   yfSrc:  'https://query1.finance.yahoo.com/v1/finance/search?q=',
   defaultPort: ['2330','2317','2454','2382','2412','6505','1301','2882','2308','3008'],
   refreshMs: 60000,
@@ -873,13 +874,19 @@ function startClock() {
 
 // ==================== FETCH HELPERS ====================
 async function proxyFetch(url) {
-  // Try proxy A first, then proxy B
-  for (const px of [CFG.proxyA, CFG.proxyB]) {
+  // Try each proxy in order; also try direct fetch last (works if target has CORS)
+  const proxies = [CFG.proxyA, CFG.proxyB, CFG.proxyC];
+  for (const px of proxies) {
     try {
-      const r = await fetch(px + encodeURIComponent(url), { signal: AbortSignal.timeout(8000) });
+      const r = await fetch(px + encodeURIComponent(url), { signal: AbortSignal.timeout(9000) });
       if (r.ok) return r;
     } catch (_) {}
   }
+  // Last resort: direct fetch (succeeds when target returns Access-Control-Allow-Origin: *)
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (r.ok) return r;
+  } catch (_) {}
   throw new Error('All proxies failed for: ' + url);
 }
 
@@ -1226,87 +1233,49 @@ async function fetchInstitutional() {
   const el = id('instContent');
   if (!el) return;
 
-  // 欄位名稱 → 顯示標籤（精確匹配 + 模糊匹配）
-  function instLabel(cat) {
-    if (cat === '三大法人') return { label: '三大合計', isTotal: true };
-    if (cat === '投信')     return { label: '投信', isTotal: false };
-    // 自營商（只取合計列，排除子項）
-    if (cat === '自營商')   return { label: '自營商', isTotal: false };
-    // 外資：可能是 "外資及陸資" 或 "外資及陸資(不含外資自營商)"，都顯示為「外資」
-    if (cat === '外資及陸資' || cat.startsWith('外資及陸資(')) return { label: '外資', isTotal: false };
-    return null;
-  }
-
   try {
+    // BFI82U has CORS — fetch directly (no proxy needed)
     const url = 'https://www.twse.com.tw/rwd/zh/fund/BFI82U?type=day&response=json';
-    const r   = await proxyFetch(url);
-    const d   = JSON.parse(await r.text());
+    let d;
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      d = JSON.parse(await r.text());
+    } catch (_) {
+      const r = await proxyFetch(url);
+      d = JSON.parse(await r.text());
+    }
     const rows = d.data || [];
     if (!rows.length) throw new Error('BFI82U empty');
 
     const n = s => parseFloat(String(s||'0').replace(/,/g,'')) || 0;
     const date = d.date ? `${d.date.slice(0,4)}/${d.date.slice(4,6)}/${d.date.slice(6,8)}` : '';
 
-    let html = `<div class="inst-hd"><i class="fa-solid fa-building-columns" style="color:var(--warn)"></i> 三大法人買賣超（億元）${date ? `<span style="font-weight:400;color:var(--text3);margin-left:.5rem">${date}</span>` : ''}</div>`;
-    let found = 0;
-
-    // 先收集「外資及陸資(不含外資自營商)」與「外資及陸資」，只顯示一個
-    let foreignRow = null;
-    const rendered = new Set();
-
+    // BFI82U 實際回傳格式（2026年）：
+    //   自營商(自行買賣), 自營商(避險), 投信,
+    //   外資及陸資(不含外資自營商), 外資自營商, 合計
+    // 規則：合計自營商子項；「合計」列 = 三大合計
+    const rowMap = {};
     rows.forEach(row => {
       const cat = (row[0] || '').trim();
-      const meta = instLabel(cat);
-      if (!meta) return;
-
-      // 外資：優先用 "外資及陸資"（合計），備用 "(不含外資自營商)"
-      if (meta.label === '外資') {
-        if (cat === '外資及陸資') {
-          foreignRow = { net: n(row[3]), isTotal: false };
-        } else if (!foreignRow) {
-          foreignRow = { net: n(row[3]), isTotal: false };
-        }
-        return;
+      const net = n(row[3]);
+      if (cat === '合計') {
+        rowMap['三大合計'] = net;
+      } else if (cat === '投信') {
+        rowMap['投信'] = net;
+      } else if (cat === '外資及陸資' || cat.startsWith('外資及陸資(')) {
+        // 優先用「外資及陸資」合計，其次用「不含外資自營商」
+        if (!('外資' in rowMap) || cat === '外資及陸資') rowMap['外資'] = net;
+      } else if (cat.startsWith('自營商')) {
+        // 累加所有自營商子項（自行買賣 + 避險）
+        rowMap['自營商'] = (rowMap['自營商'] || 0) + net;
       }
-
-      if (rendered.has(meta.label)) return;
-      rendered.add(meta.label);
-      found++;
-
-      const net  = n(row[3]);
-      const netB = (net / 1e8).toFixed(2);  // 元 ÷ 1e8 = 億
-      const dir  = net > 0 ? 'up' : net < 0 ? 'down' : 'neu';
-      const arr  = net > 0 ? '▲' : net < 0 ? '▼' : '─';
-      html += `<div class="inst-row">
-        <span class="inst-label ${meta.isTotal ? 'inst-total' : ''}">${meta.label}</span>
-        <span class="inst-val ${dir} ${meta.isTotal ? 'inst-total' : ''}">${arr} ${Math.abs(parseFloat(netB)).toFixed(2)} 億</span>
-      </div>`;
-    });
-
-    // 插入外資列（在投信後面，排序：外資→投信→自營商→三大合計）
-    // 重新按固定順序輸出更清晰，這裡直接用 sorted 方式重新 render
-    const ORDER = ['外資', '投信', '自營商', '三大合計'];
-    const dataMap = {};
-    rendered.forEach(label => {
-      // 已在 html 中，需要重新建立 map
-    });
-
-    // 用 map 方式重建更乾淨
-    const rowMap = {};
-    if (foreignRow) rowMap['外資'] = foreignRow.net;
-    rows.forEach(row => {
-      const cat  = (row[0] || '').trim();
-      const meta = instLabel(cat);
-      if (!meta || meta.label === '外資') return;
-      if (!rowMap[meta.label] && !meta.isTotal) rowMap[meta.label] = n(row[3]);
-      if (meta.isTotal && !rowMap['三大合計']) rowMap['三大合計'] = n(row[3]);
     });
 
     const totalFound = Object.keys(rowMap).length;
     if (!totalFound) throw new Error('no matching rows');
 
-    // 重建 html
-    html = `<div class="inst-hd"><i class="fa-solid fa-building-columns" style="color:var(--warn)"></i> 三大法人買賣超（億元）${date ? `<span style="font-weight:400;color:var(--text3);margin-left:.5rem">${date}</span>` : ''}</div>`;
+    const ORDER = ['外資', '投信', '自營商', '三大合計'];
+    let html = `<div class="inst-hd"><i class="fa-solid fa-building-columns" style="color:var(--warn)"></i> 三大法人買賣超（億元）${date ? `<span style="font-weight:400;color:var(--text3);margin-left:.5rem">${date}</span>` : ''}</div>`;
     ORDER.forEach(label => {
       if (!(label in rowMap)) return;
       const net  = rowMap[label];
@@ -1320,20 +1289,31 @@ async function fetchInstitutional() {
       </div>`;
     });
 
-    // 大盤成交值
+    // 大盤成交值 — FMTQIK 有 CORS，直接取；欄位格式：[日期,成交股數,成交金額,成交筆數,發行量,漲跌]
     try {
-      const r2    = await proxyFetch('https://openapi.twse.com.tw/v1/exchangeReport/FMTQIK');
-      const rows2 = JSON.parse(await r2.text());
-      if (Array.isArray(rows2) && rows2.length) {
+      const fmUrl = 'https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?response=json';
+      let d2;
+      try {
+        const r2 = await fetch(fmUrl, { signal: AbortSignal.timeout(8000) });
+        d2 = JSON.parse(await r2.text());
+      } catch (_) {
+        const r2 = await proxyFetch(fmUrl);
+        d2 = JSON.parse(await r2.text());
+      }
+      const rows2 = d2.data || [];
+      if (rows2.length) {
         const last = rows2[rows2.length - 1];
-        const val  = last['成交金額'] || '';
-        const vol  = last['成交股數'] || '';
-        const d2   = last['日期'] || '';
+        // row: [民國日期, 成交股數, 成交金額, 成交筆數, 發行量加權指數, 漲跌點數]
+        const dateRaw = last[0] || '';
+        const volRaw  = last[1] || '';
+        const valRaw  = last[2] || '';
+        const n2 = s => parseFloat(String(s||'0').replace(/,/g,'')) || 0;
+        const val = n2(valRaw), vol = n2(volRaw);
         if (val) {
-          const valB = (parseFloat(val.replace(/,/g,'')) / 1e8).toFixed(0);
-          html += `<div class="inst-hd"><i class="fa-solid fa-coins" style="color:var(--blue)"></i> 大盤成交（${d2}）</div>`;
+          const valB = (val / 1e8).toFixed(0);
+          html += `<div class="inst-hd"><i class="fa-solid fa-coins" style="color:var(--blue)"></i> 大盤成交（${dateRaw}）</div>`;
           html += `<div class="mkt-vol-row"><span class="inst-label">成交值</span><span class="inst-val" style="color:var(--blue)">${valB} 億元</span></div>`;
-          if (vol) html += `<div class="mkt-vol-row"><span class="inst-label">成交量</span><span class="inst-val">${fmtVol(parseInt(vol.replace(/,/g,'')))} 股</span></div>`;
+          if (vol) html += `<div class="mkt-vol-row"><span class="inst-label">成交量</span><span class="inst-val">${fmtVol(vol)} 股</span></div>`;
         }
       }
     } catch (_) {}
@@ -1478,11 +1458,35 @@ async function loadTpexAll() {
   } catch (e) { console.warn('[TPEx all]', e.message); }
 }
 
-// 批次載入 TWSE 上市公司名稱（嘗試多個端點）
+// 批次載入 TWSE 上市公司名稱（優先使用有 CORS 的 RWD 端點，無需 proxy）
 let _twseListLoaded = false;
 async function loadTwseList() {
   if (_twseListLoaded) return;
-  // 嘗試多個端點，取最先成功的
+
+  // ① 優先：www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL（有 CORS，直接取）
+  //    回傳格式：{ stat, fields:[證券代號,證券名稱,...], data:[["0050","元大台灣50",...]] }
+  try {
+    const r = await fetch(
+      'https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL?response=json',
+      { signal: AbortSignal.timeout(8000) }
+    );
+    const d = JSON.parse(await r.text());
+    const rows = d.data || [];
+    if (Array.isArray(rows) && rows.length) {
+      let filled = 0;
+      rows.forEach(row => {
+        const code = String(row[0] || '').trim();
+        const name = String(row[1] || '').trim();
+        if (code && name && !_twseNameCache[code]) {
+          _twseNameCache[code] = name;
+          filled++;
+        }
+      });
+      if (filled > 0) { _twseListLoaded = true; return; }
+    }
+  } catch (e) { console.warn('[TWSE list RWD]', e.message); }
+
+  // ② 備用：openapi 端點（需 proxy）
   const apis = [
     'https://openapi.twse.com.tw/v1/opendata/t187ap03_L',
     'https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL',
@@ -1517,17 +1521,32 @@ async function fetchTwseNames(stocks) {
   // ① 批次載入 TWSE 上市名稱（含全部上市股，一次解決）
   await loadTwseList();
 
-  // ② 仍缺的（可能是上櫃）→ 嘗試 STOCK_DAY 逐一查
+  // ② 仍缺的（可能是上櫃）→ 嘗試 STOCK_DAY 逐一查（CORS-enabled RWD 端點）
   const stillMissing = toFetch.filter(s => !_twseNameCache[s]);
   const needOtc = [];
   if (stillMissing.length) {
     await Promise.allSettled(stillMissing.map(async s => {
       try {
-        const url = `https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY?stockNo=${s}`;
-        const r = await proxyFetch(url);
-        const rows = JSON.parse(await r.text());
-        if (Array.isArray(rows) && rows.length) {
-          const name = parseName(rows[0]);
+        // www.twse.com.tw/rwd 有 CORS，直接取；回傳 { stat, fields, data:[array] }
+        const url = `https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?stockNo=${s}&response=json`;
+        const r = await fetch(url, { signal: AbortSignal.timeout(6000) });
+        const d = JSON.parse(await r.text());
+        const rows = d.data || [];
+        if (rows.length) {
+          // title 格式：「115年04月 2330 台積電           各日成交資訊」
+          const title = d.title || '';
+          const m = title.match(/\d{4}\s+(\S[\S\s]*?)\s{2,}各日成交資訊/);
+          const name = m ? m[1].trim() : '';
+          if (name) { _twseNameCache[s] = name; return; }
+        }
+      } catch (_) {}
+      // Fallback: try openapi with proxy
+      try {
+        const url2 = `https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY?stockNo=${s}`;
+        const r2 = await proxyFetch(url2);
+        const rows2 = JSON.parse(await r2.text());
+        if (Array.isArray(rows2) && rows2.length) {
+          const name = parseName(rows2[0]);
           if (name) { _twseNameCache[s] = name; return; }
         }
       } catch (_) {}
