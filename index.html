@@ -6,7 +6,7 @@
   <meta name="description" content="Show Me The Money - 台股看盤系統，即時股價、景氣燈號、財經新聞">
   <title>💰 Show Me The Money - 台股看盤</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" crossorigin="anonymous">
   <style>
     :root {
@@ -29,9 +29,11 @@
     body {
       background: var(--bg);
       color: var(--text);
-      font-family: 'Noto Sans TC', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      font-size: 14px;
+      font-family: 'Noto Sans TC', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 15px;
+      line-height: 1.6;
       min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
     }
 
     /* ===== HEADER ===== */
@@ -252,11 +254,11 @@
     .mkt-item:last-child { border-bottom: none; }
     .mkt-left { display: flex; align-items: center; gap: 0.55rem; }
     .mkt-flag { font-size: 1.2rem; }
-    .mkt-name { font-size: 0.8rem; font-weight: 600; }
-    .mkt-sub { font-size: 0.65rem; color: var(--text2); }
+    .mkt-name { font-size: 0.88rem; font-weight: 600; }
+    .mkt-sub { font-size: 0.7rem; color: var(--text2); }
     .mkt-right { text-align: right; }
-    .mkt-price { font-size: 0.88rem; font-weight: 700; font-variant-numeric: tabular-nums; }
-    .mkt-chg { font-size: 0.7rem; font-variant-numeric: tabular-nums; }
+    .mkt-price { font-size: 1rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .mkt-chg { font-size: 0.75rem; font-variant-numeric: tabular-nums; }
 
     .up { color: var(--up); }
     .down { color: var(--down); }
@@ -282,11 +284,11 @@
     .stock-card:hover { border-color: var(--blue); background: rgba(56,139,253,.05); }
     .stock-card.up-card { border-left-color: var(--up); }
     .stock-card.down-card { border-left-color: var(--down); }
-    .s-code { font-size: 0.78rem; font-weight: 700; color: var(--blue); }
-    .s-name { font-size: 0.67rem; color: var(--text2); margin-top: 0.1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .s-price { font-size: 1.05rem; font-weight: 700; margin-top: 0.35rem; font-variant-numeric: tabular-nums; }
-    .s-chg { font-size: 0.72rem; font-variant-numeric: tabular-nums; }
-    .s-vol { font-size: 0.62rem; color: var(--text3); margin-top: 0.15rem; }
+    .s-code { font-size: 0.82rem; font-weight: 700; color: var(--blue); }
+    .s-name { font-size: 0.78rem; color: var(--text2); margin-top: 0.1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+    .s-price { font-size: 1.15rem; font-weight: 700; margin-top: 0.35rem; font-variant-numeric: tabular-nums; }
+    .s-chg { font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+    .s-vol { font-size: 0.7rem; color: var(--text3); margin-top: 0.15rem; }
 
     /* ===== INSTITUTIONAL ===== */
     .inst-hd {
@@ -1136,17 +1138,59 @@ async function fetchTpexIndex() {
   return null;
 }
 
+// ==================== 台指近月（TXF）====================
+async function fetchTxfNear() {
+  // ① TAIFEX OpenData 日盤
+  try {
+    const r = await proxyFetch('https://openapi.taifex.com.tw/v1/DailyFuturesQuotes?CommodityID=TXF');
+    const rows = JSON.parse(await r.text());
+    if (Array.isArray(rows) && rows.length) {
+      const item = rows[rows.length - 1];
+      const parsed = parseFutPrice(item);
+      if (parsed && parsed.price > 0) return {
+        symbol: 'TXF', regularMarketPrice: parsed.price,
+        regularMarketChange: parsed.chg, regularMarketChangePercent: parsed.pct,
+        regularMarketVolume: parsed.vol, volChgPct: null,
+        regularMarketTime: Math.floor(Date.now() / 1000), shortName: '台指近月',
+      };
+    }
+  } catch (_) {}
+  // ② TAIFEX MIS
+  try {
+    const r = await proxyFetch('https://mis.taifex.com.tw/futures/api/getQuoteList?MarketCode=0&CommodityID=TXF&RowCount=3&PageNo=1&lang=zh-tw');
+    const d = JSON.parse(await r.text());
+    const item = (d.RtnData || d.Data || [])[0];
+    if (item) {
+      const parsed = parseFutPrice(item);
+      if (parsed && parsed.price > 0) return {
+        symbol: 'TXF', regularMarketPrice: parsed.price,
+        regularMarketChange: parsed.chg, regularMarketChangePercent: parsed.pct,
+        regularMarketVolume: parsed.vol, volChgPct: null,
+        regularMarketTime: Math.floor(Date.now() / 1000), shortName: '台指近月',
+      };
+    }
+  } catch (_) {}
+  // ③ Yahoo 備援
+  for (const sym of ['TXF1=F', 'FITX=F']) {
+    const q = await yfQuoteIndex(sym);
+    if (q && q.regularMarketPrice) { q.symbol = 'TXF'; q.shortName = '台指近月'; return q; }
+  }
+  return null;
+}
+
 // ==================== MARKET INDICES ====================
 async function fetchMarkets() {
   const intSyms = ['^TWII', '^N225', '^KS11', '^DJI', '^GSPC', '^IXIC'];
-  const [idxResults, tpex] = await Promise.all([
+  const [idxResults, tpex, txf] = await Promise.all([
     Promise.allSettled(intSyms.map(s => yfQuoteIndex(s))),
     fetchTpexIndex(),
+    fetchTxfNear(),
     fetchInstitutional(),
   ]);
   const qm = {};
   idxResults.forEach(r => { if (r.status === 'fulfilled' && r.value) qm[r.value.symbol] = r.value; });
   if (tpex) qm['^TPEX'] = tpex;
+  if (txf)  qm['TXF']   = txf;
   renderTW(qm);
   renderIntl(qm);
 }
@@ -1246,10 +1290,11 @@ function mktItem(q, flag, name, sub) {
 
 function renderTW(qm) {
   const el = id('twMkt');
-  const taiex = qm['^TWII'], tpex = qm['^TPEX'];
+  const taiex = qm['^TWII'], tpex = qm['^TPEX'], txf = qm['TXF'];
   el.innerHTML =
     mktItem(taiex, '🇹🇼', '台灣加權指數', 'TAIEX') +
-    mktItem(tpex,  '🏪',  '櫃買指數',     'TPEx');
+    mktItem(tpex,  '🏪',  '櫃買指數',     'TPEx')  +
+    mktItem(txf,   '📊',  '台指近月',     'TXF');
   id('twTs').textContent = taiex ? fmtTs(taiex.regularMarketTime * 1000) : '';
 }
 
@@ -1348,22 +1393,36 @@ async function loadTpexAll() {
   } catch (e) { console.warn('[TPEx all]', e.message); }
 }
 
-// 批次載入 TWSE 上市公司簡稱（一次拉全部，輕量）
+// 批次載入 TWSE 上市公司名稱（嘗試多個端點）
 let _twseListLoaded = false;
 async function loadTwseList() {
   if (_twseListLoaded) return;
-  try {
-    // t187ap03_L：上市公司基本資料，含公司代號 + 公司簡稱
-    const r = await proxyFetch('https://openapi.twse.com.tw/v1/opendata/t187ap03_L');
-    const rows = JSON.parse(await r.text());
-    if (!Array.isArray(rows) || !rows.length) return;
-    _twseListLoaded = true;
-    rows.forEach(row => {
-      const code = String(row['公司代號'] || row.Code || '').trim();
-      const name = row['公司簡稱'] || row['公司全名'] || parseName(row);
-      if (code && name && !_twseNameCache[code]) _twseNameCache[code] = name;
-    });
-  } catch (e) { console.warn('[TWSE list]', e.message); }
+  // 嘗試多個端點，取最先成功的
+  const apis = [
+    'https://openapi.twse.com.tw/v1/opendata/t187ap03_L',
+    'https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL',
+  ];
+  for (const apiUrl of apis) {
+    try {
+      const r = await proxyFetch(apiUrl);
+      const rows = JSON.parse(await r.text());
+      if (!Array.isArray(rows) || !rows.length) continue;
+      let filled = 0;
+      rows.forEach(row => {
+        const code = String(
+          row['公司代號'] || row['Code'] || row['StockNo'] || row['股票代號'] || ''
+        ).trim();
+        const name =
+          row['公司簡稱'] || row['公司名稱'] || row['公司全名'] ||
+          row['股票名稱'] || row['Name'] || row['StockName'] || parseName(row);
+        if (code && name && !_twseNameCache[code]) {
+          _twseNameCache[code] = name;
+          filled++;
+        }
+      });
+      if (filled > 0) { _twseListLoaded = true; return; }
+    } catch (e) { console.warn('[TWSE list]', apiUrl, e.message); }
+  }
 }
 
 async function fetchTwseNames(stocks) {
