@@ -1218,100 +1218,131 @@ async function fetchMarkets() {
 }
 
 // ==================== 三大法人買賣超 ====================
+// BFI82U 欄位格式（實測）：[[類別, 買進金額, 賣出金額, 買賣差額], ...]
+// 單位：元（不是千元）。 元÷1e8 = 億
+// 實際類別名稱：自營商(自行買賣)、自營商(避險)、自營商、投信、
+//               外資及陸資(不含外資自營商)、外資自營商、外資及陸資、三大法人
 async function fetchInstitutional() {
   const el = id('instContent');
   if (!el) return;
 
-  // 嘗試兩個端點
-  const instApis = [
-    'https://openapi.twse.com.tw/v1/fund/TWT38U',           // OpenAPI 標準端點（千元）
-    'https://www.twse.com.tw/rwd/zh/fund/BFI82U?type=day&response=json', // RWD 端點
-  ];
-
-  const SHOW   = ['自營商(合計)','自營商','投信','外資及陸資','三大法人'];
-  const LABELS = { '自營商(合計)':'自營商', '自營商':'自營商', '投信':'投信', '外資及陸資':'外資', '三大法人':'三大合計' };
-
-  let html = `<div class="inst-hd"><i class="fa-solid fa-building-columns" style="color:var(--warn)"></i> 三大法人買賣超（億元）</div>`;
-  let rendered = false;
-
-  for (const apiUrl of instApis) {
-    try {
-      const r = await proxyFetch(apiUrl);
-      const d = JSON.parse(await r.text());
-      // 兩個端點回傳格式不同：OpenAPI 回傳物件陣列，RWD 回傳 {data:[...]}
-      let rows = Array.isArray(d) ? d : (d.data || []);
-      if (!rows.length) continue;
-
-      // 判斷格式：物件陣列（OpenAPI）or 字串陣列陣列（RWD）
-      const isObj = typeof rows[0] === 'object' && !Array.isArray(rows[0]);
-      const n = s => parseFloat(String(s||'0').replace(/,/g,'')) || 0;
-      let tempHtml = '';
-      let found = 0;
-
-      if (isObj) {
-        // OpenAPI TWT38U 欄位：Name/買進/賣出/差額（單位：元，不需換算）
-        rows.forEach(row => {
-          const cat = (row['Name'] || row['身分別'] || row[0] || '').trim();
-          const label = LABELS[cat];
-          if (!label) return;
-          const net  = n(row['買賣差額'] || row['Difference'] || row[3]);
-          const netB = (net / 1e8).toFixed(2);  // 元 → 億元
-          const dir  = net > 0 ? 'up' : net < 0 ? 'down' : 'neu';
-          const arr  = net > 0 ? '▲' : net < 0 ? '▼' : '─';
-          const isTotal = cat === '三大法人';
-          tempHtml += `<div class="inst-row">
-            <span class="inst-label ${isTotal ? 'inst-total' : ''}">${label}</span>
-            <span class="inst-val ${dir} ${isTotal ? 'inst-total' : ''}">${arr} ${Math.abs(parseFloat(netB)).toFixed(2)} 億</span>
-          </div>`;
-          found++;
-        });
-      } else {
-        // RWD BFI82U：[[類別, 買進, 賣出, 差額], ...] 單位：千元
-        rows.forEach(row => {
-          const cat = (row[0] || '').trim();
-          const label = LABELS[cat];
-          if (!label) return;
-          const net  = n(row[3]);
-          const netB = (net / 1e5).toFixed(2);  // 千元 → 億元
-          const dir  = net > 0 ? 'up' : net < 0 ? 'down' : 'neu';
-          const arr  = net > 0 ? '▲' : net < 0 ? '▼' : '─';
-          const isTotal = cat === '三大法人';
-          tempHtml += `<div class="inst-row">
-            <span class="inst-label ${isTotal ? 'inst-total' : ''}">${label}</span>
-            <span class="inst-val ${dir} ${isTotal ? 'inst-total' : ''}">${arr} ${Math.abs(parseFloat(netB)).toFixed(2)} 億</span>
-          </div>`;
-          found++;
-        });
-      }
-
-      if (found > 0) { html += tempHtml; rendered = true; break; }
-    } catch (e) { console.warn('[Inst]', apiUrl, e.message); }
+  // 欄位名稱 → 顯示標籤（精確匹配 + 模糊匹配）
+  function instLabel(cat) {
+    if (cat === '三大法人') return { label: '三大合計', isTotal: true };
+    if (cat === '投信')     return { label: '投信', isTotal: false };
+    // 自營商（只取合計列，排除子項）
+    if (cat === '自營商')   return { label: '自營商', isTotal: false };
+    // 外資：可能是 "外資及陸資" 或 "外資及陸資(不含外資自營商)"，都顯示為「外資」
+    if (cat === '外資及陸資' || cat.startsWith('外資及陸資(')) return { label: '外資', isTotal: false };
+    return null;
   }
 
-  if (!rendered) {
-    el.innerHTML = `<div class="inst-hd" style="color:var(--text3)"><i class="fa-solid fa-circle-exclamation"></i> 三大法人資料暫無法取得</div>`;
-    return;
-  }
-
-  // 大盤成交值
   try {
-    const r2 = await proxyFetch('https://openapi.twse.com.tw/v1/exchangeReport/FMTQIK');
-    const rows2 = JSON.parse(await r2.text());
-    if (Array.isArray(rows2) && rows2.length) {
-      const last = rows2[rows2.length - 1];
-      const val  = last['成交金額'] || last['tradeValue'] || '';
-      const vol  = last['成交股數'] || last['tradeVolume'] || '';
-      const date = last['日期'] || last['date'] || '';
-      if (val) {
-        const valB = (parseFloat(val.replace(/,/g,'')) / 1e8).toFixed(0);
-        html += `<div class="inst-hd"><i class="fa-solid fa-coins" style="color:var(--blue)"></i> 大盤成交（${date}）</div>`;
-        html += `<div class="mkt-vol-row"><span class="inst-label">成交值</span><span class="inst-val" style="color:var(--blue)">${valB} 億元</span></div>`;
-        if (vol) html += `<div class="mkt-vol-row"><span class="inst-label">成交量</span><span class="inst-val">${fmtVol(parseInt(vol.replace(/,/g,'')))} 股</span></div>`;
-      }
-    }
-  } catch (_) {}
+    const url = 'https://www.twse.com.tw/rwd/zh/fund/BFI82U?type=day&response=json';
+    const r   = await proxyFetch(url);
+    const d   = JSON.parse(await r.text());
+    const rows = d.data || [];
+    if (!rows.length) throw new Error('BFI82U empty');
 
-  el.innerHTML = html;
+    const n = s => parseFloat(String(s||'0').replace(/,/g,'')) || 0;
+    const date = d.date ? `${d.date.slice(0,4)}/${d.date.slice(4,6)}/${d.date.slice(6,8)}` : '';
+
+    let html = `<div class="inst-hd"><i class="fa-solid fa-building-columns" style="color:var(--warn)"></i> 三大法人買賣超（億元）${date ? `<span style="font-weight:400;color:var(--text3);margin-left:.5rem">${date}</span>` : ''}</div>`;
+    let found = 0;
+
+    // 先收集「外資及陸資(不含外資自營商)」與「外資及陸資」，只顯示一個
+    let foreignRow = null;
+    const rendered = new Set();
+
+    rows.forEach(row => {
+      const cat = (row[0] || '').trim();
+      const meta = instLabel(cat);
+      if (!meta) return;
+
+      // 外資：優先用 "外資及陸資"（合計），備用 "(不含外資自營商)"
+      if (meta.label === '外資') {
+        if (cat === '外資及陸資') {
+          foreignRow = { net: n(row[3]), isTotal: false };
+        } else if (!foreignRow) {
+          foreignRow = { net: n(row[3]), isTotal: false };
+        }
+        return;
+      }
+
+      if (rendered.has(meta.label)) return;
+      rendered.add(meta.label);
+      found++;
+
+      const net  = n(row[3]);
+      const netB = (net / 1e8).toFixed(2);  // 元 ÷ 1e8 = 億
+      const dir  = net > 0 ? 'up' : net < 0 ? 'down' : 'neu';
+      const arr  = net > 0 ? '▲' : net < 0 ? '▼' : '─';
+      html += `<div class="inst-row">
+        <span class="inst-label ${meta.isTotal ? 'inst-total' : ''}">${meta.label}</span>
+        <span class="inst-val ${dir} ${meta.isTotal ? 'inst-total' : ''}">${arr} ${Math.abs(parseFloat(netB)).toFixed(2)} 億</span>
+      </div>`;
+    });
+
+    // 插入外資列（在投信後面，排序：外資→投信→自營商→三大合計）
+    // 重新按固定順序輸出更清晰，這裡直接用 sorted 方式重新 render
+    const ORDER = ['外資', '投信', '自營商', '三大合計'];
+    const dataMap = {};
+    rendered.forEach(label => {
+      // 已在 html 中，需要重新建立 map
+    });
+
+    // 用 map 方式重建更乾淨
+    const rowMap = {};
+    if (foreignRow) rowMap['外資'] = foreignRow.net;
+    rows.forEach(row => {
+      const cat  = (row[0] || '').trim();
+      const meta = instLabel(cat);
+      if (!meta || meta.label === '外資') return;
+      if (!rowMap[meta.label] && !meta.isTotal) rowMap[meta.label] = n(row[3]);
+      if (meta.isTotal && !rowMap['三大合計']) rowMap['三大合計'] = n(row[3]);
+    });
+
+    const totalFound = Object.keys(rowMap).length;
+    if (!totalFound) throw new Error('no matching rows');
+
+    // 重建 html
+    html = `<div class="inst-hd"><i class="fa-solid fa-building-columns" style="color:var(--warn)"></i> 三大法人買賣超（億元）${date ? `<span style="font-weight:400;color:var(--text3);margin-left:.5rem">${date}</span>` : ''}</div>`;
+    ORDER.forEach(label => {
+      if (!(label in rowMap)) return;
+      const net  = rowMap[label];
+      const netB = (net / 1e8).toFixed(2);
+      const dir  = net > 0 ? 'up' : net < 0 ? 'down' : 'neu';
+      const arr  = net > 0 ? '▲' : net < 0 ? '▼' : '─';
+      const isT  = label === '三大合計';
+      html += `<div class="inst-row">
+        <span class="inst-label ${isT ? 'inst-total' : ''}">${label}</span>
+        <span class="inst-val ${dir} ${isT ? 'inst-total' : ''}">${arr} ${Math.abs(parseFloat(netB)).toFixed(2)} 億</span>
+      </div>`;
+    });
+
+    // 大盤成交值
+    try {
+      const r2    = await proxyFetch('https://openapi.twse.com.tw/v1/exchangeReport/FMTQIK');
+      const rows2 = JSON.parse(await r2.text());
+      if (Array.isArray(rows2) && rows2.length) {
+        const last = rows2[rows2.length - 1];
+        const val  = last['成交金額'] || '';
+        const vol  = last['成交股數'] || '';
+        const d2   = last['日期'] || '';
+        if (val) {
+          const valB = (parseFloat(val.replace(/,/g,'')) / 1e8).toFixed(0);
+          html += `<div class="inst-hd"><i class="fa-solid fa-coins" style="color:var(--blue)"></i> 大盤成交（${d2}）</div>`;
+          html += `<div class="mkt-vol-row"><span class="inst-label">成交值</span><span class="inst-val" style="color:var(--blue)">${valB} 億元</span></div>`;
+          if (vol) html += `<div class="mkt-vol-row"><span class="inst-label">成交量</span><span class="inst-val">${fmtVol(parseInt(vol.replace(/,/g,'')))} 股</span></div>`;
+        }
+      }
+    } catch (_) {}
+
+    el.innerHTML = html;
+  } catch (e) {
+    console.warn('[Inst]', e.message);
+    el.innerHTML = `<div class="inst-hd" style="color:var(--text3)"><i class="fa-solid fa-circle-exclamation"></i> 三大法人資料暫無法取得</div>`;
+  }
 }
 
 function mktItem(q, flag, name, sub) {
