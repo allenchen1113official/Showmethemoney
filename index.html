@@ -1163,25 +1163,32 @@ async function fetchInstitutional() {
     const rows = d.data || [];
     if (!rows.length) throw new Error('empty');
 
-    // BFI82U 欄位: [類別, 買進金額, 賣出金額, 買賣差額]
-    const labels = { '自營商': '自營商', '投信': '投信', '外資及陸資': '外資' };
+    // BFI82U 欄位: [類別, 買進金額, 賣出金額, 買賣差額]，單位：千元
+    // 千元 → 億元：除以 100,000（1e5），不是 1e8
+    // 只顯示彙總列，過濾子項目（自營商(自行買賣)、自營商(避險)、外資自營商 等）
+    const SHOW = new Set(['自營商', '投信', '外資及陸資', '三大法人']);
+    const LABELS = { '自營商': '自營商', '投信': '投信', '外資及陸資': '外資', '三大法人': '三大合計' };
     let html = `<div class="inst-hd"><i class="fa-solid fa-building-columns" style="color:var(--warn)"></i> 三大法人買賣超（億元）</div>`;
+    let hasData = false;
 
     rows.forEach(row => {
       const cat = row[0]?.trim();
-      if (!cat) return;
+      if (!cat || !SHOW.has(cat)) return;   // 過濾子項目
+      hasData = true;
       const netRaw = (row[3] || '0').replace(/,/g, '');
-      const net = parseFloat(netRaw) || 0;
-      const netB = (net / 1e8).toFixed(2);
-      const dir = net > 0 ? 'up' : net < 0 ? 'down' : 'neu';
-      const arr = net > 0 ? '▲' : net < 0 ? '▼' : '─';
-      const isTotal = cat.includes('合計');
-      const label = labels[cat] || cat;
+      const net  = parseFloat(netRaw) || 0;
+      const netB = (net / 1e5).toFixed(2);  // 千元 ÷ 1e5 = 億元
+      const dir  = net > 0 ? 'up' : net < 0 ? 'down' : 'neu';
+      const arr  = net > 0 ? '▲' : net < 0 ? '▼' : '─';
+      const isTotal = cat === '三大法人';
+      const label = LABELS[cat] || cat;
       html += `<div class="inst-row">
-        <span class="inst-label ${isTotal ? 'inst-total' : ''}">${isTotal ? '三大合計' : label}</span>
+        <span class="inst-label ${isTotal ? 'inst-total' : ''}">${label}</span>
         <span class="inst-val ${dir} ${isTotal ? 'inst-total' : ''}">${arr} ${Math.abs(parseFloat(netB)).toFixed(2)} 億</span>
       </div>`;
     });
+
+    if (!hasData) throw new Error('no matching rows');
 
     // 加全市場成交值
     try {
