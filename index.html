@@ -1161,18 +1161,38 @@ function startClock() {
 }
 
 // ==================== FETCH HELPERS ====================
+// Proxy 請求序列化器：避免同時發出大量請求觸發 rate limit
+// cors.lol 限制約每 500ms 4 個請求，序列化後每隔 350ms 發一個即可穩定運作
+let _proxyQ = Promise.resolve();
+
 async function proxyFetch(url) {
-  // Try each proxy in order; also try direct fetch last (works if target has CORS)
-  const proxies = [CFG.proxyA, CFG.proxyB, CFG.proxyC];
-  for (const px of proxies) {
+  return new Promise((resolve, reject) => {
+    _proxyQ = _proxyQ
+      .then(() => new Promise(r => setTimeout(r, 350)))  // 間隔 350ms
+      .then(() => _proxyFetchExec(url))
+      .then(resolve, reject)
+      .then(() => {}, () => {});  // 吞掉錯誤，確保 queue 不中斷
+  });
+}
+
+async function _proxyFetchExec(url) {
+  // 代理錯誤回應特徵（HTTP 200 但內容是錯誤訊息）
+  const BAD = ['Rate limit exceeded', 'Edge: Too', 'Server-side requests are not allowed',
+               'Temporary key expired', 'Too Many Requests'];
+  const isGood = t => !BAD.some(s => t.slice(0, 300).includes(s)) && !t.trimStart().startsWith('<');
+  const mkResp = t => new Response(t, { status: 200, headers: { 'Content-Type': 'text/plain' } });
+
+  for (const px of [CFG.proxyA, CFG.proxyB, CFG.proxyC]) {
     try {
-      const r = await fetch(px + encodeURIComponent(url), { signal: AbortSignal.timeout(9000) });
-      if (r.ok) return r;
+      const r = await fetch(px + encodeURIComponent(url), { signal: AbortSignal.timeout(7000) });
+      if (!r.ok) continue;
+      const t = await r.text();
+      if (isGood(t)) return mkResp(t);
     } catch (_) {}
   }
-  // Last resort: direct fetch (succeeds when target returns Access-Control-Allow-Origin: *)
+  // 最後嘗試直接請求（目標若有 CORS 頭則成功）
   try {
-    const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const r = await fetch(url, { signal: AbortSignal.timeout(6000) });
     if (r.ok) return r;
   } catch (_) {}
   throw new Error('All proxies failed for: ' + url);
