@@ -604,6 +604,64 @@
       .input-grid { grid-template-columns: 1fr; }
       .logo h1 { font-size: 0.95rem; }
     }
+
+    /* ===== AUTH AREA (HEADER) ===== */
+    .auth-area { display: flex; align-items: center; gap: 0.45rem; }
+    .auth-user {
+      font-size: 0.68rem; color: var(--text2);
+      max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .auth-btn {
+      background: none; border: 1px solid var(--border);
+      color: var(--text2); padding: 0.25rem 0.55rem;
+      border-radius: 6px; cursor: pointer; font-size: 0.72rem;
+      font-family: inherit; transition: all .2s; white-space: nowrap;
+    }
+    .auth-btn:hover { border-color: var(--blue); color: var(--blue); }
+    .auth-btn.auth-signout { border-color: rgba(248,81,73,.35); color: #f85149; }
+    .auth-btn.auth-signout:hover { border-color: #f85149; }
+
+    /* ===== SYNC ICON ===== */
+    .sync-icon { font-size: 0.7rem; margin-left: 0.4rem; vertical-align: middle; }
+    .sync-icon.synced   { color: #3fb950; }
+    .sync-icon.syncing  { color: var(--blue); animation: spin .9s linear infinite; }
+    .sync-icon.sync-err { color: #f85149; }
+    .sync-icon.offline  { color: var(--text3); }
+
+    /* ===== AUTH MODAL ===== */
+    #authOverlay {
+      display: none; position: fixed; inset: 0;
+      background: rgba(0,0,0,.72); z-index: 300;
+      align-items: center; justify-content: center; padding: 1rem;
+    }
+    #authOverlay.show { display: flex; }
+    .auth-modal {
+      background: var(--bg3); border: 1px solid var(--border);
+      border-radius: 12px; padding: 1.5rem;
+      width: 100%; max-width: 360px;
+    }
+    .auth-modal-hd {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 1.1rem;
+    }
+    .auth-modal-title { font-size: 0.92rem; font-weight: 700; }
+    .auth-field { display: flex; flex-direction: column; gap: 0.22rem; margin-bottom: 0.7rem; }
+    .auth-field label { font-size: 0.69rem; color: var(--text2); }
+    .auth-field input {
+      background: var(--bg2); border: 1px solid var(--border);
+      border-radius: 6px; padding: 0.4rem 0.65rem;
+      color: var(--text); font-size: 0.85rem; font-family: inherit;
+      transition: border-color .2s;
+    }
+    .auth-field input:focus { outline: none; border-color: var(--blue); }
+    .auth-msg { font-size: 0.72rem; min-height: 1.1em; margin-bottom: 0.5rem; }
+    .auth-msg.err { color: #f85149; }
+    .auth-msg.ok  { color: #3fb950; }
+    .auth-toggle {
+      font-size: 0.72rem; color: var(--blue); cursor: pointer;
+      background: none; border: none; padding: 0; font-family: inherit;
+      text-decoration: underline; display: block; margin: 0.6rem auto 0; text-align: center;
+    }
   </style>
 </head>
 <body>
@@ -625,6 +683,7 @@
       <div class="clock-time" id="clkTime">--:--:--</div>
       <div class="clock-date" id="clkDate">----/--/--</div>
     </div>
+    <div class="auth-area" id="authArea"><!-- rendered by updateAuthUI() --></div>
     <button class="btn-icon" id="refreshBtn">
       <i class="fa-solid fa-rotate-right"></i> 更新
     </button>
@@ -703,7 +762,10 @@
     <!-- 自選股 -->
     <div class="card">
       <div class="card-hd">
-        <div class="card-title"><i class="fa-solid fa-briefcase"></i> 自選股（10組）</div>
+        <div class="card-title">
+          <i class="fa-solid fa-briefcase"></i> 自選股（10組）
+          <i class="fa-solid fa-cloud sync-icon offline" id="syncIcon" title="未登入，使用本機儲存"></i>
+        </div>
         <button class="btn-icon" id="btnOpenModal" onclick="openModal()">
           <i class="fa-solid fa-pen"></i> 編輯
         </button>
@@ -765,7 +827,34 @@
   </a>
 </footer>
 
-<!-- ===== MODAL ===== -->
+<!-- ===== AUTH MODAL ===== -->
+<div id="authOverlay" onclick="if(event.target===this)closeAuthModal()">
+  <div class="auth-modal">
+    <div class="auth-modal-hd">
+      <span class="auth-modal-title" id="authModalTitle">
+        <i class="fa-solid fa-user-circle"></i> 登入
+      </span>
+      <button class="modal-close" onclick="closeAuthModal()">✕</button>
+    </div>
+    <div class="auth-field">
+      <label>Email</label>
+      <input type="email" id="authEmail" placeholder="you@example.com" autocomplete="email"
+             onkeydown="if(event.key==='Enter')handleAuthSubmit()">
+    </div>
+    <div class="auth-field">
+      <label>密碼</label>
+      <input type="password" id="authPassword" placeholder="至少 6 個字元" autocomplete="current-password"
+             onkeydown="if(event.key==='Enter')handleAuthSubmit()">
+    </div>
+    <div class="auth-msg" id="authMsg"></div>
+    <button class="btn-prim" style="width:100%" id="authSubmitBtn" onclick="handleAuthSubmit()">
+      <i class="fa-solid fa-right-to-bracket"></i> <span id="authSubmitLabel">登入</span>
+    </button>
+    <button class="auth-toggle" id="authToggle" onclick="toggleAuthMode()">還沒有帳號？點此註冊</button>
+  </div>
+</div>
+
+<!-- ===== PORTFOLIO MODAL ===== -->
 <div id="overlay" class="overlay" onclick="if(event.target===this)closeModal()">
   <div class="modal">
     <div class="modal-hd">
@@ -783,8 +872,19 @@
   </div>
 </div>
 
+<!-- 本機私鑰設定（已加入 .gitignore，不會 commit 到 GitHub） -->
+<script src="./config.js"></script>
+<!-- Supabase JS SDK (UMD build — exposes window.supabase) -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+
 <script>
 'use strict';
+
+// ==================== SUPABASE CONFIG ====================
+// 憑證從外部 config.js (已加入 .gitignore) 注入 window.SMTM_CONFIG
+// 若 config.js 未載入則以 placeholder 取代，Supabase 功能自動停用
+const SUPABASE_URL      = window.SMTM_CONFIG?.SUPABASE_URL      || '';
+const SUPABASE_ANON_KEY = window.SMTM_CONFIG?.SUPABASE_ANON_KEY || '';
 
 // ==================== CONFIG ====================
 const CFG = {
@@ -807,6 +907,186 @@ const TL_MAP = {
 
 let portfolio = [];
 let refreshTimer = null;
+
+// ==================== SUPABASE STATE ====================
+let _sb       = null;   // Supabase client instance
+let _sbUser   = null;   // current auth user or null
+let _authMode = 'login'; // 'login' | 'signup'
+
+function initSupabase() {
+  if (!window.supabase || SUPABASE_URL.includes('YOUR_PROJECT_ID')) return;
+  _sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+}
+
+function setupAuthListener() {
+  if (!_sb) { updateAuthUI(null); return; }
+  // Restore existing session immediately
+  _sb.auth.getSession().then(({ data }) => {
+    _sbUser = data?.session?.user ?? null;
+    updateAuthUI(_sbUser);
+    if (_sbUser) syncFromCloud();
+  });
+  // Watch for login / logout events
+  _sb.auth.onAuthStateChange((_event, session) => {
+    _sbUser = session?.user ?? null;
+    updateAuthUI(_sbUser);
+    if (_event === 'SIGNED_IN')  syncFromCloud();
+    if (_event === 'SIGNED_OUT') setSyncIcon('offline', '未登入，使用本機儲存');
+  });
+}
+
+// ==================== SYNC HELPERS ====================
+function setSyncIcon(state, title) {
+  const el = id('syncIcon');
+  if (!el) return;
+  const icons = { synced:'fa-cloud', syncing:'fa-rotate', 'sync-err':'fa-cloud', offline:'fa-cloud' };
+  el.className = `fa-solid ${icons[state] || 'fa-cloud'} sync-icon ${state}`;
+  el.title = title || '';
+}
+
+async function syncFromCloud() {
+  if (!_sb || !_sbUser) return;
+  setSyncIcon('syncing', '從雲端同步中…');
+  try {
+    const { data, error } = await _sb
+      .from('portfolios')
+      .select('stocks')
+      .eq('user_id', _sbUser.id)
+      .maybeSingle();
+    if (error) throw error;
+    if (data?.stocks?.length) {
+      portfolio = data.stocks.slice(0, 10);
+      while (portfolio.length < 10) portfolio.push('');
+      localStorage.setItem('smtm_port', JSON.stringify(portfolio));
+      sessionStorage.removeItem('smtm_port_cache');
+      fetchPortfolio();
+      fetchPortNews();
+    }
+    setSyncIcon('synced', `已同步：${_sbUser.email}`);
+  } catch (e) {
+    console.error('[Supabase sync]', e);
+    setSyncIcon('sync-err', '同步失敗：' + e.message);
+  }
+}
+
+async function pushToCloud(stocks) {
+  if (!_sb || !_sbUser) return;
+  setSyncIcon('syncing', '儲存至雲端…');
+  try {
+    const { error } = await _sb.from('portfolios').upsert({
+      user_id:    _sbUser.id,
+      stocks:     stocks,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'user_id' });
+    if (error) throw error;
+    setSyncIcon('synced', `已同步：${_sbUser.email}`);
+  } catch (e) {
+    console.error('[Supabase push]', e);
+    setSyncIcon('sync-err', '雲端儲存失敗：' + e.message);
+  }
+}
+
+// ==================== AUTH UI ====================
+function updateAuthUI(user) {
+  const area = id('authArea');
+  if (!area) return;
+  if (!_sb) {
+    // Supabase not configured — hide auth area entirely
+    area.innerHTML = '';
+    return;
+  }
+  if (user) {
+    const email = user.email || '';
+    area.innerHTML = `
+      <span class="auth-user" title="${esc(email)}">${esc(email)}</span>
+      <button class="auth-btn auth-signout" onclick="handleSignOut()">
+        <i class="fa-solid fa-right-from-bracket"></i> 登出
+      </button>`;
+    setSyncIcon('synced', `已登入：${email}`);
+  } else {
+    area.innerHTML = `
+      <button class="auth-btn" onclick="openAuthModal()">
+        <i class="fa-solid fa-user"></i> 登入
+      </button>`;
+    setSyncIcon('offline', '未登入，使用本機儲存');
+  }
+}
+
+// ==================== AUTH MODAL ====================
+function openAuthModal() {
+  _authMode = 'login';
+  id('authModalTitle').innerHTML = '<i class="fa-solid fa-user-circle"></i> 登入';
+  id('authSubmitLabel').textContent = '登入';
+  id('authToggle').textContent = '還沒有帳號？點此註冊';
+  id('authMsg').textContent = '';
+  id('authMsg').className = 'auth-msg';
+  id('authEmail').value = '';
+  id('authPassword').value = '';
+  id('authOverlay').classList.add('show');
+  setTimeout(() => id('authEmail').focus(), 50);
+}
+
+function closeAuthModal() {
+  id('authOverlay').classList.remove('show');
+}
+
+function toggleAuthMode() {
+  _authMode = _authMode === 'login' ? 'signup' : 'login';
+  const isLogin = _authMode === 'login';
+  id('authModalTitle').innerHTML =
+    `<i class="fa-solid fa-user-circle"></i> ${isLogin ? '登入' : '註冊'}`;
+  id('authSubmitLabel').textContent = isLogin ? '登入' : '註冊帳號';
+  id('authToggle').textContent = isLogin ? '還沒有帳號？點此註冊' : '已有帳號？點此登入';
+  id('authMsg').textContent = '';
+  id('authMsg').className = 'auth-msg';
+  id('authPassword').value = '';
+}
+
+async function handleAuthSubmit() {
+  if (!_sb) return;
+  const email    = (id('authEmail').value || '').trim();
+  const password = id('authPassword').value || '';
+  const btn      = id('authSubmitBtn');
+  const msgEl    = id('authMsg');
+
+  if (!email || !password) {
+    msgEl.textContent = '請輸入 Email 與密碼';
+    msgEl.className = 'auth-msg err';
+    return;
+  }
+
+  msgEl.textContent = '';
+  btn.disabled = true;
+
+  try {
+    let result;
+    if (_authMode === 'login') {
+      result = await _sb.auth.signInWithPassword({ email, password });
+    } else {
+      result = await _sb.auth.signUp({ email, password });
+    }
+    if (result.error) throw result.error;
+
+    // signUp but email confirmation required
+    if (_authMode === 'signup' && !result.data.session) {
+      msgEl.textContent = '請至信箱點擊確認連結後，再回來登入。';
+      msgEl.className = 'auth-msg ok';
+      return;
+    }
+    closeAuthModal();
+  } catch (e) {
+    msgEl.textContent = e.message;
+    msgEl.className = 'auth-msg err';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function handleSignOut() {
+  if (!_sb) return;
+  await _sb.auth.signOut();
+  // onAuthStateChange will fire → updateAuthUI(null)
+}
 
 // ==================== QUOTE API ====================
 let _quotesCache = null;
@@ -834,6 +1114,8 @@ async function fetchQuote() {
 
 // ==================== INIT ====================
 function init() {
+  initSupabase();       // 建立 Supabase client（需先載入 config.js）
+  setupAuthListener();  // 設定 auth 監聽、恢復登入狀態
   loadPortfolio();
   startClock();
   bindModalEvents();
@@ -2105,6 +2387,7 @@ function savePortfolio() {
   closeModal();
   fetchPortfolio();
   fetchPortNews();
+  if (_sbUser) pushToCloud(portfolio); // 若已登入，同步至雲端
 }
 
 function bindModalEvents() {
