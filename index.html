@@ -1419,7 +1419,7 @@ function renderTL(el, score, month, updated) {
   else if (score >= 23) type = 'green';
   else if (score >= 17) type = 'yellowBlue';
   else type = 'blue';
-  el.innerHTML = tlHTML(type, score, month, updated);
+  setHtml(el, tlHTML(type, score, month, updated))
 }
 
 function tlHTML(type, score, month, updated) {
@@ -1674,10 +1674,10 @@ async function fetchInstitutional() {
       }
     } catch (_) {}
 
-    el.innerHTML = html;
+    setHtml(el, html)
   } catch (e) {
     console.warn('[Inst]', e.message);
-    el.innerHTML = `<div class="inst-hd" style="color:var(--text3)"><i class="fa-solid fa-circle-exclamation"></i> 三大法人資料暫無法取得</div>`;
+    setHtml(el, `<div class="inst-hd" style="color:var(--text3)"><i class="fa-solid fa-circle-exclamation"></i> 三大法人資料暫無法取得</div>`)
   }
 }
 
@@ -1712,10 +1712,10 @@ function mktItem(q, flag, name, sub) {
 function renderTW(qm) {
   const el = id('twMkt');
   const taiex = qm['^TWII'], tpex = qm['^TPEX'], txf = qm['TXF'];
-  el.innerHTML =
+  setHtml(el,
     mktItem(taiex, '🇹🇼', '台灣加權指數', 'TAIEX') +
     mktItem(tpex,  '🏪',  '櫃買指數',     'TPEx')  +
-    mktItem(txf,   '📊',  '台指近月',     'TXF');
+    mktItem(txf,   '📊',  '台指近月',     'TXF'));
   id('twTs').textContent = taiex ? fmtTs(taiex.regularMarketTime * 1000) : '';
 }
 
@@ -1757,7 +1757,7 @@ function renderIntl(qm) {
     { s:'^GSPC',  flag:'🇺🇸', name:'標普 500',   sub:'S&P 500' },
     { s:'^IXIC',  flag:'🇺🇸', name:'那斯達克',   sub:'NASDAQ' },
   ];
-  el.innerHTML = items.map(i => mktItem(qm[i.s], i.flag, i.name, i.sub)).join('');
+  setHtml(el, items.map(i => mktItem(qm[i.s], i.flag, i.name, i.sub)).join(''))
   const ref = items.map(i => qm[i.s]).find(q => q?.regularMarketTime);
   id('intlTs').textContent = ref ? fmtTs(ref.regularMarketTime * 1000) : '';
 }
@@ -1937,7 +1937,7 @@ async function fetchPortfolio() {
   const el = id('portGrid');
   const valid = portfolio.filter(Boolean);
   if (!valid.length) {
-    el.innerHTML = '<p style="grid-column:1/-1;text-align:center;color:var(--text3);padding:1.5rem;font-size:.78rem">點擊「編輯」新增自選股</p>';
+    setHtml(el, '<p style="grid-column:1/-1;text-align:center;color:var(--text3);padding:1.5rem;font-size:.78rem">點擊「編輯」新增自選股</p>')
     return;
   }
 
@@ -1945,7 +1945,7 @@ async function fetchPortfolio() {
   const CACHE_KEY = 'smtm_port_cache';
   const cached = sessionStorage.getItem(CACHE_KEY);
   if (cached) {
-    el.innerHTML = cached;
+    setHtml(el, cached)
   } else {
     el.innerHTML = portfolio.map((s, i) => `
       <div class="stock-card">
@@ -2023,7 +2023,7 @@ async function fetchPortfolio() {
         <div class="s-vol">量 ${fmtVol(q.regularMarketVolume)}${volChgHtml}</div>
       </div>`;
   }).join('');
-  el.innerHTML = newHtml;
+  setHtml(el, newHtml)
   sessionStorage.setItem(CACHE_KEY, newHtml);
 }
 
@@ -2053,10 +2053,10 @@ async function fetchPortNews() {
   const el = id('portNews');
   const valid = portfolio.filter(Boolean);
   if (!valid.length) {
-    el.innerHTML = '<p style="text-align:center;color:var(--text3);font-size:.78rem;padding:1rem">請先設定自選股</p>';
+    setHtml(el, '<p style="text-align:center;color:var(--text3);font-size:.78rem;padding:1rem">請先設定自選股</p>')
     return;
   }
-  el.innerHTML = '<div class="loading"><i class="fa-solid fa-circle-notch"></i> 載入中...</div>';
+  setHtml(el, '<div class="loading"><i class="fa-solid fa-circle-notch"></i> 載入中...</div>')
 
   // 確保中文名稱已填（若從 refreshAll 呼叫則已由 fetchPortfolio 完成）
   await fetchTwseNames(valid);
@@ -2095,11 +2095,11 @@ async function fetchPortNews() {
     .slice(0, 20);
 
   if (!top.length) {
-    el.innerHTML = `<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 暫無相關新聞<br><small style="color:var(--text3)">請確認自選股已設定</small></div>`;
+    setHtml(el, `<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 暫無相關新聞<br><small style="color:var(--text3)">請確認自選股已設定</small></div>`)
     return;
   }
 
-  el.innerHTML = top.map(n => `
+  setHtml(el, top.map(n => `
     <div class="pn-item">
       <a href="${n.link}" target="_blank" rel="noopener">
         <div class="pn-title">${esc(n.title)}</div>
@@ -2109,7 +2109,7 @@ async function fetchPortNews() {
         ${n.publisher ? `<span class="ntime">${esc(n.publisher)}</span>` : ''}
         <span class="ntime">${n._ts ? ago(n._ts) : ''}</span>
       </div>
-    </div>`).join('');
+    </div>`).join(''));
 
   id('pnTs').textContent = fmtTs(Date.now());
 }
@@ -2162,7 +2162,7 @@ function fetchFinCal() {
     .sort((a,b) => a._date - b._date);
 
   if (!inRange.length) {
-    el.innerHTML = '<p class="fin-empty">本週無重大財經事件</p>';
+    setHtml(el, '<p class="fin-empty">本週無重大財經事件</p>')
     return;
   }
 
@@ -2180,7 +2180,7 @@ function fetchFinCal() {
 
   const dotCls = { fed:'ev-fed', cbc:'ev-cbc', data:'ev-data', earn:'ev-earn', mkt:'ev-mkt' };
 
-  el.innerHTML = Object.values(groups).map(g => {
+  setHtml(el, Object.values(groups).map(g => {
     const lbl = isToday(g.date) ? '📌 今天 ' + dayFmt(g.date)
               : isYest(g.date)  ? '⏮ 昨天 ' + dayFmt(g.date)
               : '📅 ' + dayFmt(g.date);
@@ -2196,7 +2196,7 @@ function fetchFinCal() {
         </div>
       </div>`).join('');
     return `<div class="${dayCls}"><div class="fin-day-lbl">${lbl}</div>${evHtml}</div>`;
-  }).join('');
+  }).join(''));
 }
 
 // ==================== 翻譯工具（Google Translate 免費端點）====================
@@ -2247,8 +2247,8 @@ async function fetchReddit() {
   res.forEach(r => { if (r.status === 'fulfilled') allPosts.push(...r.value); });
 
   if (!allPosts.length) {
-    el.innerHTML = `<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 載入失敗<br>
-      <a href="https://www.reddit.com/r/stocks/" target="_blank">前往 Reddit/stocks</a></div>`;
+    setHtml(el, `<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 載入失敗<br>
+      <a href="https://www.reddit.com/r/stocks/" target="_blank">前往 Reddit/stocks</a></div>`);
     return;
   }
 
@@ -2260,7 +2260,7 @@ async function fetchReddit() {
   // 並行翻譯所有標題為繁體中文
   const translated = await Promise.allSettled(top.map(p => translateZhTW(p.title)));
 
-  el.innerHTML = top.map((p, i) => {
+  setHtml(el, top.map((p, i) => {
     const zhTitle = translated[i]?.status === 'fulfilled' ? translated[i].value : p.title;
     return `
     <div class="reddit-item">
@@ -2275,7 +2275,7 @@ async function fetchReddit() {
         <span class="ntime">${ago(p.created_utc * 1000)}</span>
       </div>
     </div>`;
-  }).join('');
+  }).join(''));
 }
 
 // ==================== PTT (Atom format) ====================
@@ -2289,7 +2289,7 @@ async function fetchPTT() {
 
   // 有效快取直接使用
   if (_pttCache.html && Date.now() - _pttCache.ts < PTT_TTL) {
-    el.innerHTML = _pttCache.html;
+    setHtml(el, _pttCache.html)
     return;
   }
 
@@ -2333,18 +2333,18 @@ async function fetchPTT() {
 
     _pttCache.html = html;
     _pttCache.ts   = Date.now();
-    el.innerHTML   = html;
+    setHtml(el, html)
 
   } catch (e) {
     console.warn('[PTT]', e.message);
     if (_pttCache.html) {
-      el.innerHTML = _pttCache.html +
-        '<p style="font-size:.65rem;color:var(--text3);text-align:center;margin-top:.4rem">（快取資料）</p>';
+      setHtml(el, _pttCache.html +
+        '<p style="font-size:.65rem;color:var(--text3);text-align:center;margin-top:.4rem">（快取資料）</p>');
     } else {
-      el.innerHTML = `<div class="err">
+      setHtml(el, `<div class="err">
         <i class="fa-solid fa-triangle-exclamation"></i> PTT 載入失敗<br>
         <a href="https://www.ptt.cc/bbs/Stock/" target="_blank">前往 PTT Stock 板</a>
-      </div>`;
+      </div>`);
     }
   }
 }
@@ -2358,7 +2358,7 @@ async function fetchFinanceNews() {
   const el = id('finContent');
 
   if (_finCache.html && Date.now() - _finCache.ts < FIN_TTL) {
-    el.innerHTML = _finCache.html;
+    setHtml(el, _finCache.html)
     return;
   }
 
@@ -2405,7 +2405,7 @@ async function fetchFinanceNews() {
   }
 
   if (!allItems.length) {
-    el.innerHTML = '<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 財經新聞載入失敗<br><small>請稍後重試</small></div>';
+    setHtml(el, '<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 財經新聞載入失敗<br><small>請稍後重試</small></div>')
     return;
   }
 
@@ -2435,7 +2435,7 @@ async function fetchFinanceNews() {
 
   _finCache.html = html;
   _finCache.ts   = Date.now();
-  el.innerHTML   = html;
+  setHtml(el, html)
 }
 
 // ==================== PORTFOLIO MODAL ====================
@@ -2498,6 +2498,13 @@ async function refreshAll() {
 
 // ==================== UTILS ====================
 const id = s => document.getElementById(s);
+
+// 設定 innerHTML 並同時移除 loading class（避免旋轉動畫卡住）
+function setHtml(el, html) {
+  if (!el) return;
+  el.classList.remove('loading');
+  el.innerHTML = html;
+}
 
 function fmtN(n, d = 2) {
   if (n == null || isNaN(n)) return '--';
