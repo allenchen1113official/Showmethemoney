@@ -882,9 +882,37 @@
 
 // ==================== SUPABASE CONFIG ====================
 // 憑證從外部 config.js (已加入 .gitignore) 注入 window.SMTM_CONFIG
-// 若 config.js 未載入則以 placeholder 取代，Supabase 功能自動停用
-const SUPABASE_URL      = window.SMTM_CONFIG?.SUPABASE_URL      || '';
-const SUPABASE_ANON_KEY = window.SMTM_CONFIG?.SUPABASE_ANON_KEY || '';
+// v2: 憑證使用 AES-GCM + hostname 衍生金鑰加密，防止他人直接複製使用
+let SUPABASE_URL = '', SUPABASE_ANON_KEY = '';
+
+async function _decryptConfig() {
+  const cfg = window.SMTM_CONFIG;
+  if (!cfg) return;
+  if (cfg._v !== 2) {
+    // v1 (明文，相容舊 config)
+    SUPABASE_URL      = cfg.SUPABASE_URL      || '';
+    SUPABASE_ANON_KEY = cfg.SUPABASE_ANON_KEY || '';
+    return;
+  }
+  // v2: AES-GCM 解密
+  const host = location.hostname || 'localhost';
+  if (cfg._hosts && !cfg._hosts.includes(host)) return; // 非授權網域，直接放棄
+  try {
+    const salt = new TextEncoder().encode('smtm-v2-salt-2026');
+    const keyMat = await crypto.subtle.importKey('raw', new TextEncoder().encode(host), 'PBKDF2', false, ['deriveKey']);
+    const aesKey = await crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' },
+      keyMat, { name: 'AES-GCM', length: 256 }, false, ['decrypt']
+    );
+    const dec = async (b64) => {
+      const buf = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+      const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: buf.slice(0, 12) }, aesKey, buf.slice(12));
+      return new TextDecoder().decode(plain);
+    };
+    SUPABASE_URL      = await dec(cfg.SUPABASE_URL);
+    SUPABASE_ANON_KEY = await dec(cfg.SUPABASE_ANON_KEY);
+  } catch (e) { console.warn('Config decrypt failed:', e.message); }
+}
 
 // ==================== CONFIG ====================
 const CFG = {
@@ -1119,14 +1147,15 @@ async function fetchQuote() {
 }
 
 // ==================== INIT ====================
-function init() {
-  initSupabase();       // 建立 Supabase client（需先載入 config.js）
-  setupAuthListener();  // 設定 auth 監聽、恢復登入狀態
+async function init() {
+  await _decryptConfig();   // ★ 先解密 Supabase 憑證（AES-GCM, async）
+  initSupabase();            // 建立 Supabase client
+  setupAuthListener();       // 設定 auth 監聽、恢復登入狀態
   loadPortfolio();
   startClock();
   bindModalEvents();
   fetchQuote();
-  setInterval(fetchQuote, 10 * 60 * 1000); // rotate every 10 min
+  setInterval(fetchQuote, 10 * 60 * 1000);
   refreshAll();
   refreshTimer = setInterval(refreshAll, CFG.refreshMs);
 }
@@ -1161,41 +1190,39 @@ function startClock() {
 }
 
 // ==================== FETCH HELPERS ====================
-// Proxy 請求序列化器：避免同時發出大量請求觸發 rate limit
-// cors.lol 限制約每 500ms 4 個請求，序列化後每隔 350ms 發一個即可穩定運作
-let _proxyQ = Promise.resolve();
-
+// Proxy 競速：三個 proxy 同時出發（略微錯開），取最快成功者
+// 避免 rate limit 同時打爆同一 proxy，又比逐一嘗試快 3 倍
 async function proxyFetch(url) {
-  return new Promise((resolve, reject) => {
-    _proxyQ = _proxyQ
-      .then(() => new Promise(r => setTimeout(r, 350)))  // 間隔 350ms
-      .then(() => _proxyFetchExec(url))
-      .then(resolve, reject)
-      .then(() => {}, () => {});  // 吞掉錯誤，確保 queue 不中斷
-  });
-}
-
-async function _proxyFetchExec(url) {
-  // 代理錯誤回應特徵（HTTP 200 但內容是錯誤訊息）
   const BAD = ['Rate limit exceeded', 'Edge: Too', 'Server-side requests are not allowed',
-               'Temporary key expired', 'Too Many Requests'];
-  const isGood = t => !BAD.some(s => t.slice(0, 300).includes(s)) && !t.trimStart().startsWith('<');
+               'Temporary key expired', 'Too Many Requests', '<!DOCTYPE', '<html'];
+  const isGood = t => !BAD.some(s => t.slice(0, 300).includes(s));
   const mkResp = t => new Response(t, { status: 200, headers: { 'Content-Type': 'text/plain' } });
 
-  for (const px of [CFG.proxyA, CFG.proxyB, CFG.proxyC]) {
-    try {
-      const r = await fetch(px + encodeURIComponent(url), { signal: AbortSignal.timeout(7000) });
-      if (!r.ok) continue;
-      const t = await r.text();
-      if (isGood(t)) return mkResp(t);
-    } catch (_) {}
-  }
-  // 最後嘗試直接請求（目標若有 CORS 頭則成功）
+  const tryProxy = async (px, delay) => {
+    if (delay) await new Promise(r => setTimeout(r, delay));
+    const r = await fetch(px + encodeURIComponent(url), { signal: AbortSignal.timeout(8000) });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const t = await r.text();
+    if (!isGood(t)) throw new Error('bad response: ' + t.slice(0, 80));
+    return mkResp(t);
+  };
+
   try {
-    const r = await fetch(url, { signal: AbortSignal.timeout(6000) });
-    if (r.ok) return r;
-  } catch (_) {}
-  throw new Error('All proxies failed for: ' + url);
+    // cors.lol 立即, allorigins 錯開 300ms, codetabs 錯開 600ms, 直接 1200ms
+    return await Promise.any([
+      tryProxy(CFG.proxyA, 0),
+      tryProxy(CFG.proxyB, 300),
+      tryProxy(CFG.proxyC, 600),
+      (async () => {
+        await new Promise(r => setTimeout(r, 1200));
+        const r = await fetch(url, { signal: AbortSignal.timeout(6000) });
+        if (!r.ok) throw new Error(`direct HTTP ${r.status}`);
+        return r;
+      })(),
+    ]);
+  } catch {
+    throw new Error('All proxies failed for: ' + url);
+  }
 }
 
 // 單支股票：使用 v8 chart API（range=5d 以取得前一日成交量作比較）
@@ -1355,61 +1382,56 @@ async function fetchTaifex() {
 }
 
 // ==================== TRAFFIC LIGHT ====================
+// NDC 景氣燈號靜態資料（NDC API 被 Cloudflare 封鎖，每月人工更新）
+// 資料來源：https://index.ndc.gov.tw/ ，每月最後一個工作日公布前一月數據
+const TL_STATIC = { score: 40, month: '2026年2月', updated: '2026/03/31' };
+
 async function fetchTL() {
   const el = id('tlContent');
-  try {
-    // Try NDC API (best-effort)
-    const r = await fetch('https://index.ndc.gov.tw/n/json/leading/zh-TW',
-      { signal: AbortSignal.timeout(6000) });
-    if (r.ok) {
+
+  // ① 嘗試 NDC API（Cloudflare 已封鎖，通常直接失敗，保留以備日後恢復）
+  for (const fetcher of [
+    () => fetch('https://index.ndc.gov.tw/n/json/leading/zh-TW', { signal: AbortSignal.timeout(4000) }),
+    () => proxyFetch('https://index.ndc.gov.tw/n/json/leading/zh-TW'),
+  ]) {
+    try {
+      const r = await fetcher();
+      if (!r.ok) continue;
       const d = await r.json();
       const arr = d.data || d;
       if (Array.isArray(arr) && arr.length) {
         const last = arr[arr.length - 1];
         const score = last.score ?? last.综合判断分数 ?? last.總分;
         const month = last.yearMonth || last.date || '';
-        if (score) { renderTL(el, score, month); return; }
+        if (score) { renderTL(el, +score, month); return; }
       }
-    }
-  } catch (_) {}
+    } catch (_) {}
+  }
 
-  // Try via proxy
-  try {
-    const r2 = await proxyFetch('https://index.ndc.gov.tw/n/json/leading/zh-TW');
-    const t = await r2.text();
-    const d = JSON.parse(t);
-    const arr = d.data || d;
-    if (Array.isArray(arr) && arr.length) {
-      const last = arr[arr.length - 1];
-      const score = last.score ?? last.综合判断分数 ?? last.總分;
-      const month = last.yearMonth || last.date || '';
-      if (score) { renderTL(el, score, month); return; }
-    }
-  } catch (_) {}
-
-  // Static fallback
-  el.innerHTML = tlHTML('green', null, '請至NDC查看最新資料');
+  // ② 靜態資料備援（維持最新正確數值，每月手動更新 TL_STATIC）
+  renderTL(el, TL_STATIC.score, TL_STATIC.month, TL_STATIC.updated);
 }
 
-function renderTL(el, score, month) {
+function renderTL(el, score, month, updated) {
   let type = 'green';
   if (score >= 38) type = 'red';
   else if (score >= 32) type = 'yellowRed';
   else if (score >= 23) type = 'green';
   else if (score >= 17) type = 'yellowBlue';
   else type = 'blue';
-  el.innerHTML = tlHTML(type, score, month);
+  el.innerHTML = tlHTML(type, score, month, updated);
 }
 
-function tlHTML(type, score, month) {
+function tlHTML(type, score, month, updated) {
   const t = TL_MAP[type];
+  const updNote = updated ? `<span style="font-size:.65rem;color:var(--text3);margin-left:.4rem">資料更新：${updated}</span>` : '';
   return `
     <div class="tl-wrap">
       <div class="tl-bulb" style="background:${t.bg};box-shadow:0 0 18px ${t.bg}">${t.icon}</div>
       <div>
         <div class="tl-label" style="color:${t.color}">${t.label}</div>
         <div class="tl-sub">${t.desc}${score ? ` (${score}分)` : ''}</div>
-        <div class="tl-date">${month || '參考值'}</div>
+        <div class="tl-date">${month || '參考值'}${updNote}</div>
       </div>
     </div>
     <a href="https://index.ndc.gov.tw/" target="_blank" class="tl-link">
