@@ -888,9 +888,9 @@ const SUPABASE_ANON_KEY = window.SMTM_CONFIG?.SUPABASE_ANON_KEY || '';
 
 // ==================== CONFIG ====================
 const CFG = {
-  proxyA: 'https://api.cors.lol/?url=',                    // primary (CORS-enabled, free)
-  proxyB: 'https://api.codetabs.com/v1/proxy/?quest=',     // fallback (good for Taiwan APIs)
-  proxyC: 'https://corsproxy.io/?url=',                    // tertiary (legacy)
+  proxyA: 'https://api.cors.lol/?url=',                    // primary (good when not rate-limited)
+  proxyB: 'https://api.allorigins.win/raw?url=',           // secondary (different service)
+  proxyC: 'https://api.codetabs.com/v1/proxy/?quest=',     // tertiary (YF often rate-limited)
   yfChart:'https://query1.finance.yahoo.com/v8/finance/chart/',
   yfSrc:  'https://query1.finance.yahoo.com/v1/finance/search?q=',
   defaultPort: ['2330','2317','2454','2382','2412','6505','1301','2882','2308','3008'],
@@ -1200,6 +1200,14 @@ async function _proxyFetchExec(url) {
 
 // 單支股票：使用 v8 chart API（range=5d 以取得前一日成交量作比較）
 async function yfQuote(symbol) {
+  // ★ 台股快取優先：STOCK_DAY_ALL（TSE）或 TPEx openapi（OTC）→ 完全不需 proxy
+  const code = symbol.replace(/\.(TW|TWO)$/i, '');
+  if (/\.(TW|TWO)$/i.test(symbol)) {
+    if (_twsePriceCache[code])  return _twsePriceCache[code];   // TSE 上市
+    if (_otcPriceCache[code])   return _otcPriceCache[code];    // OTC 上櫃
+  }
+
+  // Fallback：Yahoo Finance via proxy（用於國際股票或台股快取未命中）
   const url = CFG.yfChart + encodeURIComponent(symbol) + '?interval=1d&range=5d';
   try {
     const r = await proxyFetch(url);
@@ -1732,9 +1740,10 @@ function renderIntl(qm) {
   id('intlTs').textContent = ref ? fmtTs(ref.regularMarketTime * 1000) : '';
 }
 
-// ==================== 中文股名 + 上櫃股價快取 ====================
-const _twseNameCache = {};   // code → 中文名
-const _otcPriceCache = {};   // code → { price, chg, pct, vol, ts }
+// ==================== 中文股名 + 上市/上櫃股價快取 ====================
+const _twseNameCache  = {};   // code → 中文名
+const _twsePriceCache = {};   // code → quote object（STOCK_DAY_ALL，直接 CORS，零 proxy）
+const _otcPriceCache  = {};   // code → quote object（TPEx openapi，一次 proxy 拉全部）
 const _otcSet = new Set();   // 已確認為上櫃的代號
 
 function parseName(row) {
@@ -1803,9 +1812,23 @@ async function loadTwseList() {
       rows.forEach(row => {
         const code = String(row[0] || '').trim();
         const name = String(row[1] || '').trim();
-        if (code && name && !_twseNameCache[code]) {
-          _twseNameCache[code] = name;
-          filled++;
+        if (!code || !name) return;
+        if (!_twseNameCache[code]) _twseNameCache[code] = name;
+        filled++;
+        // 同時建立收盤價快取（row: code,name,vol,value,open,high,low,close,change,txns）
+        const n = s => parseFloat(String(s || '').replace(/,/g, '')) || 0;
+        const close  = n(row[7]);
+        const change = n(row[8]);
+        if (close > 0) {
+          const prev = close - change;
+          _twsePriceCache[code] = {
+            symbol: code + '.TW',
+            shortName: name,
+            regularMarketPrice:         close,
+            regularMarketChange:        change,
+            regularMarketChangePercent: prev > 0 ? change / prev * 100 : 0,
+            regularMarketVolume:        n(row[2]) / 1000, // 張
+          };
         }
       });
       if (filled > 0) { _twseListLoaded = true; return; }
@@ -1910,12 +1933,13 @@ async function fetchPortfolio() {
       </div>`).join('');
   }
 
-  // ① 並行：YF 上市股價 (.TW) + TWSE/TPEx 名稱 + TPEx 全批報價
+  // ① 先載入所有台股快取（TSE: 零proxy，OTC: 一次proxy）
+  //    確保快取就緒後，yfQuote() 命中快取，不再逐支打 proxy
+  await fetchTwseNames(valid);  // → loadTwseList()(_twsePriceCache) + loadTpexAll()(_otcPriceCache)
+
+  // ② 用快取取得股價（TSE/OTC 皆命中快取 → 零 proxy；其餘才走 YF proxy）
   const twseSyms = valid.map(s => s + '.TW');
-  const [yfResults] = await Promise.all([
-    yfQuotes(twseSyms),
-    fetchTwseNames(valid),   // 內部會呼叫 loadTpexAll()（若有上櫃）
-  ]);
+  const yfResults = await yfQuotes(twseSyms);
 
   const qm = {};
   yfResults.forEach(q => {
