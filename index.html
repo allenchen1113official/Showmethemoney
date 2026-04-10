@@ -1500,60 +1500,72 @@ function tlHTML(type, score, month, updated) {
 }
 
 // ==================== 櫃買指數（TPEx Composite Index）====================
+const _SS_TPEX = 'smtm_tpex_last';
 async function fetchTpexIndex() {
-  const mkQ = (price, chg, pct) => ({
-    symbol: '^TPEX', regularMarketPrice: price,
-    regularMarketChange: chg, regularMarketChangePercent: pct,
-    regularMarketVolume: 0, volChgPct: null,
-    regularMarketTime: Math.floor(Date.now() / 1000), shortName: '櫃買指數',
-  });
+  const mkQ = (price, chg, pct) => {
+    const q = { symbol: '^TPEX', regularMarketPrice: price,
+      regularMarketChange: chg, regularMarketChangePercent: pct,
+      regularMarketVolume: 0, volChgPct: null,
+      regularMarketTime: Math.floor(Date.now() / 1000), shortName: '櫃買指數' };
+    try { sessionStorage.setItem(_SS_TPEX, JSON.stringify(q)); } catch(_) {}
+    return q;
+  };
 
-  // ① TWSE MIS API（與加權指數同端點，otc_OTC01.tw）
+  // ① TWSE MIS API（otc_OTC01.tw）— 交易時段有 z（成交）和 y（昨收）
   try {
     const url = 'https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=otc_OTC01.tw&json=1&delay=0';
     const r = await proxyFetch(url);
     const d = JSON.parse(await r.text());
     const m = (d.msgArray || [])[0];
     if (m) {
-      // z=成交價, y=昨收, b=最佳買價(fallback)
-      const price = parseFloat(m.z || m.pz || 0);
-      const prev  = parseFloat(m.y  || 0);
+      const price = parseFloat((m.z && m.z !== '-') ? m.z : (m.pz || m.y || 0));
+      const prev  = parseFloat(m.y || 0);
       if (price > 0 && prev > 0) return mkQ(price, price - prev, (price - prev) / prev * 100);
       if (price > 0) return mkQ(price, 0, 0);
     }
   } catch (_) {}
 
-  // ② Yahoo Finance ^TWO（TPEx 加權指數，Yahoo 有效符號）
-  const q2 = await yfQuoteIndex('^TWO');
-  if (q2 && q2.regularMarketPrice) { q2.symbol = '^TPEX'; q2.shortName = '櫃買指數'; return q2; }
-
-  // ③ Yahoo Finance ^TPEX（備援）
-  const q3 = await yfQuoteIndex('^TPEX');
-  if (q3 && q3.regularMarketPrice) return q3;
-
-  // ④ TPEx 即時報價頁面 JSON（透過 proxy）
+  // ② Yahoo Finance ^TWO（price 可信，change 可能為 0）
   try {
-    const r = await proxyFetch('https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php?l=zh-tw&o=json&d=&se=EW&s=0,asc,0&_=1');
+    const q2 = await yfQuoteIndex('^TWO');
+    if (q2 && q2.regularMarketPrice > 50) { // sanity check
+      q2.symbol = '^TPEX'; q2.shortName = '櫃買指數';
+      return mkQ(q2.regularMarketPrice, q2.regularMarketChange || 0, q2.regularMarketChangePercent || 0);
+    }
+  } catch (_) {}
+
+  // ③ TPEx 當日行情頁（透過 proxy）
+  try {
+    const r = await proxyFetch('https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php?l=zh-tw&o=json&d=&se=EW&s=0,asc,0');
     const d = JSON.parse(await r.text());
     const n = s => parseFloat(String(s||'').replace(/,/g,'')) || 0;
-    if (d && d.tpex_weighted_index) {
+    if (d?.tpex_weighted_index) {
       const price = n(d.tpex_weighted_index);
       const prev  = n(d.yesterday_weighted_index);
-      if (price > 0) return mkQ(price, price - prev, prev > 0 ? (price - prev)/prev*100 : 0);
+      if (price > 0) return mkQ(price, price - prev, prev > 0 ? (price-prev)/prev*100 : 0);
     }
+  } catch (_) {}
+
+  // ④ 上次已知值（session storage）
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(_SS_TPEX) || 'null');
+    if (saved?.regularMarketPrice) return saved;
   } catch (_) {}
 
   return null;
 }
 
 // ==================== 台指近月（TXF）====================
+const _SS_TXF = 'smtm_txf_last';
 async function fetchTxfNear() {
-  const mkQ = (p) => ({
-    symbol: 'TXF', regularMarketPrice: p.price,
-    regularMarketChange: p.chg, regularMarketChangePercent: p.pct,
-    regularMarketVolume: p.vol, volChgPct: null,
-    regularMarketTime: Math.floor(Date.now() / 1000), shortName: '台指近月',
-  });
+  const mkQ = (p) => {
+    const q = { symbol: 'TXF', regularMarketPrice: p.price,
+      regularMarketChange: p.chg, regularMarketChangePercent: p.pct,
+      regularMarketVolume: p.vol || 0, volChgPct: null,
+      regularMarketTime: Math.floor(Date.now() / 1000), shortName: '台指近月' };
+    try { sessionStorage.setItem(_SS_TXF, JSON.stringify(q)); } catch(_) {}
+    return q;
+  };
 
   // ① TWSE MIS（tse_TXFR1.tw = 台指期近月連續）
   try {
@@ -1562,8 +1574,8 @@ async function fetchTxfNear() {
     const d = JSON.parse(await r.text());
     const m = (d.msgArray || [])[0];
     if (m) {
-      const price = parseFloat(m.z || m.pz || 0);
-      const prev  = parseFloat(m.y || 0);
+      const price = parseFloat((m.z && m.z !== '-') ? m.z : (m.pz || 0));
+      const prev  = parseFloat((m.y && m.y !== '-') ? m.y : 0);
       if (price > 0) {
         const chg = prev > 0 ? price - prev : 0;
         const pct = prev > 0 ? chg / prev * 100 : 0;
@@ -1572,54 +1584,49 @@ async function fetchTxfNear() {
     }
   } catch (_) {}
 
-  // ② TAIFEX OpenData（日盤收盤資料）
-  try {
-    const r = await proxyFetch('https://openapi.taifex.com.tw/v1/DailyFuturesQuotes?CommodityID=TXF');
-    const rows = JSON.parse(await r.text());
-    if (Array.isArray(rows) && rows.length) {
-      // 取最後一筆（當日 or 最近交易日）
-      for (let i = rows.length - 1; i >= 0; i--) {
-        const parsed = parseFutPrice(rows[i]);
-        if (parsed && parsed.price > 0) return mkQ(parsed);
-      }
-    }
-  } catch (_) {}
-
-  // ③ TAIFEX MIS（日盤即時，需 POST）
+  // ② TAIFEX MIS（直接 POST，不過 proxy）
   try {
     for (const mc of ['0', '1']) {
       const r = await fetch('https://mis.taifex.com.tw/futures/api/getQuoteList', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ MarketCode: mc, CommodityID: 'TXF', RowCount: 10, PageNo: 1 }),
-        signal: AbortSignal.timeout(8000),
+        signal: AbortSignal.timeout(6000),
       });
       if (!r.ok) continue;
       const d = JSON.parse(await r.text());
-      const list = (d.RtData || d.RtnData || d.Data || {}).QuoteList || [];
-      const item = list.find(i => {
-        const sid = i.SymbolID || i.CommodityId || i.CommodityID || '';
-        return sid.startsWith('TXF') && sid.includes('-F');
-      }) || list.find(i => (i.SymbolID || '').startsWith('TXF'));
+      const list = ((d.RtData || d.RtnData || d.Data || {}).QuoteList || []);
+      const item = list.find(i => (i.SymbolID||'').startsWith('TXF') && (i.SymbolID||'').includes('-F'))
+                || list.find(i => (i.SymbolID||'').startsWith('TXF'));
       if (item) {
         const parsed = parseFutPrice({
           ClosingPrice: item.CLastPrice || item.SettlementPrice,
           ReferencePrice: item.CRefPrice,
-          Change: item.CDiff,        // CDiff = CLastPrice - CRefPrice
+          Change: item.CDiff,
           Volume: item.CTotalVolume,
         });
-        if (parsed && parsed.price > 0) return mkQ(parsed);
+        if (parsed?.price > 0) return mkQ(parsed);
       }
     }
   } catch (_) {}
 
-  // ④ Yahoo Finance 備援
-  for (const sym of ['TXF1=F', 'FITX=F', 'TWF=F']) {
+  // ③ Yahoo Finance 備援（TXF1=F 近月合約）
+  for (const sym of ['TXF1=F', 'FITX=F']) {
     try {
       const q = await yfQuoteIndex(sym);
-      if (q && q.regularMarketPrice) { q.symbol = 'TXF'; q.shortName = '台指近月'; return q; }
+      if (q?.regularMarketPrice > 0) {
+        q.symbol = 'TXF'; q.shortName = '台指近月';
+        return mkQ({ price: q.regularMarketPrice, chg: q.regularMarketChange, pct: q.regularMarketChangePercent, vol: 0 });
+      }
     } catch (_) {}
   }
+
+  // ④ 上次已知值（session storage）
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(_SS_TXF) || 'null');
+    if (saved?.regularMarketPrice) return saved;
+  } catch (_) {}
+
   return null;
 }
 
@@ -1639,29 +1646,28 @@ async function yfQuoteIndexCached(symbol) {
 
 async function fetchMarkets() {
   const intSyms = ['^TWII', '^N225', '^KS11', '^DJI', '^GSPC', '^IXIC'];
+  const delay   = ms => new Promise(r => setTimeout(r, ms));
 
-  // 先渲染現有快取（讓畫面立刻有資料）
-  const cachedQm = {};
-  intSyms.forEach(s => { if (_intlCache[s]?.data) cachedQm[_intlCache[s].data.symbol] = _intlCache[s].data; });
-  if (Object.keys(cachedQm).length) { renderTW(cachedQm); renderIntl(cachedQm); }
+  // qm 持續更新，每有新資料就重渲染
+  const qm = {};
+  intSyms.forEach(s => { if (_intlCache[s]?.data) qm[_intlCache[s].data.symbol] = _intlCache[s].data; });
+  if (Object.keys(qm).length) { renderTW(qm); renderIntl(qm); }
 
-  // 需要重新 fetch 的（快取過期或第一次）
-  const stale = intSyms.filter(s => {
-    const hit = _intlCache[s];
-    return !hit || Date.now() - hit.ts >= INTL_TTL;
-  });
+  // 各指數 250ms 錯開，每拿到一個立即 render（不等其他人）
+  const idxPromises = intSyms.map((s, i) =>
+    delay(i * 250).then(() => yfQuoteIndexCached(s)).then(q => {
+      if (q) { qm[q.symbol] = q; renderTW(qm); renderIntl(qm); }
+    }).catch(() => {})
+  );
 
-  // 錯開 200ms 間隔，避免 6 支同時打 proxy 觸發 rate limit
-  const delay = ms => new Promise(r => setTimeout(r, ms));
-  const [idxResults, tpex, txf] = await Promise.all([
-    Promise.allSettled(stale.map((s, i) => delay(i * 250).then(() => yfQuoteIndexCached(s)))),
+  // TPEx / TXF / 三大法人 並行跑（不等指數）
+  const [tpex, txf] = await Promise.all([
     fetchTpexIndex(),
     fetchTxfNear(),
     fetchInstitutional(),
+    ...idxPromises,   // 一起等所有指數完成
   ]);
 
-  const qm = { ...cachedQm };
-  idxResults.forEach(r => { if (r.status === 'fulfilled' && r.value) qm[r.value.symbol] = r.value; });
   if (tpex) qm['^TPEX'] = tpex;
   if (txf)  qm['TXF']   = txf;
   renderTW(qm);
