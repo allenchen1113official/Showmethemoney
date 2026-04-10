@@ -1511,38 +1511,61 @@ async function fetchTpexIndex() {
     return q;
   };
 
-  // ① TWSE MIS API（otc_OTC01.tw）— 交易時段有 z（成交）和 y（昨收）
+  // ① TWSE MIS API（otc_OTC01.tw）— 交易時段即時
   try {
     const url = 'https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=otc_OTC01.tw&json=1&delay=0';
     const r = await proxyFetch(url);
     const d = JSON.parse(await r.text());
     const m = (d.msgArray || [])[0];
     if (m) {
-      const price = parseFloat((m.z && m.z !== '-') ? m.z : (m.pz || m.y || 0));
-      const prev  = parseFloat(m.y || 0);
+      const price = parseFloat((m.z && m.z !== '-') ? m.z : 0);
+      const prev  = parseFloat((m.y && m.y !== '-') ? m.y : 0);
       if (price > 0 && prev > 0) return mkQ(price, price - prev, (price - prev) / prev * 100);
       if (price > 0) return mkQ(price, 0, 0);
     }
   } catch (_) {}
 
-  // ② Yahoo Finance ^TWO（price 可信，change 可能為 0）
+  // ② Yahoo Finance ^TWO — 用 v8 chart raw data 直接取 prevClose 計算漲跌
   try {
-    const q2 = await yfQuoteIndex('^TWO');
-    if (q2 && q2.regularMarketPrice > 50) { // sanity check
-      q2.symbol = '^TPEX'; q2.shortName = '櫃買指數';
-      return mkQ(q2.regularMarketPrice, q2.regularMarketChange || 0, q2.regularMarketChangePercent || 0);
+    const url = CFG.yfChart + '%5ETWO?interval=1d&range=5d';
+    const r = await proxyFetch(url);
+    const d = JSON.parse(await r.text());
+    const result = d.chart?.result?.[0];
+    const meta   = result?.meta;
+    if (meta?.regularMarketPrice > 50) {
+      const price = meta.regularMarketPrice;
+      const prev  = meta.chartPreviousClose || meta.regularMarketPreviousClose || 0;
+      // 計算真實漲跌（不信任 meta.regularMarketChange，可能為 0）
+      const chg   = prev > 0 ? price - prev : 0;
+      const pct   = prev > 0 ? chg / prev * 100 : 0;
+      return mkQ(price, chg, pct);
     }
   } catch (_) {}
 
-  // ③ TPEx 當日行情頁（透過 proxy）
+  // ③ TPEx openapi daily close quotes（有 CORS，直接 fetch）
+  //    從 NextReferencePrice = 今日收盤，Change = 今日漲跌，推算指數
   try {
-    const r = await proxyFetch('https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php?l=zh-tw&o=json&d=&se=EW&s=0,asc,0');
-    const d = JSON.parse(await r.text());
-    const n = s => parseFloat(String(s||'').replace(/,/g,'')) || 0;
-    if (d?.tpex_weighted_index) {
-      const price = n(d.tpex_weighted_index);
-      const prev  = n(d.yesterday_weighted_index);
-      if (price > 0) return mkQ(price, price - prev, prev > 0 ? (price-prev)/prev*100 : 0);
+    const r = await fetch('https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes',
+      { signal: AbortSignal.timeout(8000) });
+    const rows = JSON.parse(await r.text());
+    if (Array.isArray(rows) && rows.length > 500) {
+      const n = s => parseFloat(String(s||'0').replace(/[+,\s]/g,'')) || 0;
+      // 取加權市值計算：sum(Close * Capitals) / sum(Capitals)
+      let sumVal = 0, sumCap = 0, sumChgVal = 0;
+      rows.forEach(row => {
+        const close = n(row.Close);
+        const cap   = n(row.Capitals);
+        const chg   = n(row.Change);
+        if (close > 0 && cap > 0) { sumVal += close * cap; sumCap += cap; sumChgVal += chg * cap; }
+      });
+      // 這不等於 TPEx 指數，但可提供漲跌方向；實際指數從 session storage 取
+      const saved = JSON.parse(sessionStorage.getItem(_SS_TPEX) || 'null');
+      if (saved?.regularMarketPrice > 50 && sumCap > 0) {
+        const avgChg = sumChgVal / sumCap; // 加權平均漲跌（方向）
+        const price  = saved.regularMarketPrice;
+        const chgEst = avgChg > 0 ? Math.abs(price * avgChg / 100) : avgChg < 0 ? -Math.abs(price * avgChg / 100) : 0;
+        return mkQ(price, chgEst, price > 0 ? chgEst / (price - chgEst) * 100 : 0);
+      }
     }
   } catch (_) {}
 
@@ -1808,7 +1831,7 @@ function mktItem(q, flag, name, sub) {
       </div>
       <div class="mkt-right">
         <div class="mkt-price neu">--</div>
-        <div class="mkt-chg neu">暫無資料</div>
+        <div class="mkt-chg neu" style="font-size:.7rem;color:var(--text3)">--</div>
       </div>
     </div>`;
   const p = q.regularMarketPrice, ch = q.regularMarketChange, pct = q.regularMarketChangePercent;
