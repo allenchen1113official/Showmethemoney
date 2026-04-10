@@ -1,7 +1,8 @@
 # ===========================
 # 私鑰與設定檔（不 commit）
 # ===========================
-config.js
+# config.js 已加密（AES-GCM + hostname 限制），可安全 commit
+# config.js
 .env
 .env.*
 
