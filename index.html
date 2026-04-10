@@ -1097,19 +1097,49 @@ async function handleAuthSubmit() {
     if (_authMode === 'login') {
       result = await _sb.auth.signInWithPassword({ email, password });
     } else {
-      result = await _sb.auth.signUp({ email, password });
+      const redirectTo = location.origin + location.pathname.replace(/\/$/, '') + '/';
+      result = await _sb.auth.signUp({
+        email, password,
+        options: { emailRedirectTo: redirectTo }
+      });
     }
     if (result.error) throw result.error;
 
     // signUp but email confirmation required
     if (_authMode === 'signup' && !result.data.session) {
-      msgEl.textContent = '請至信箱點擊確認連結後，再回來登入。';
+      // Show clear success state then switch back to login
+      id('authSubmitBtn').style.display = 'none';
+      msgEl.innerHTML = `
+        <div style="text-align:center;padding:0.5rem 0">
+          <div style="font-size:1.8rem;margin-bottom:0.4rem">📧</div>
+          <div style="font-weight:700;margin-bottom:0.3rem">確認信已寄出！</div>
+          <div style="color:var(--text2);font-size:0.8rem;line-height:1.5">
+            請至 <strong>${esc(email)}</strong> 的信箱<br>
+            點擊確認連結後，即可回來登入。
+          </div>
+        </div>`;
       msgEl.className = 'auth-msg ok';
+      id('authToggle').textContent = '返回登入';
+      id('authToggle').onclick = () => {
+        id('authSubmitBtn').style.display = '';
+        id('authToggle').onclick = toggleAuthMode;
+        toggleAuthMode();  // switch back to login
+      };
       return;
     }
     closeAuthModal();
   } catch (e) {
-    msgEl.textContent = e.message;
+    // Translate common Supabase errors to Chinese
+    const errMap = {
+      'Invalid login credentials': '帳號或密碼錯誤',
+      'Email not confirmed': '請先至信箱點擊確認連結後再登入',
+      'User already registered': '此 Email 已註冊，請直接登入',
+      'Password should be at least 6 characters': '密碼至少需要 6 個字元',
+      'signup is disabled': '目前暫停開放新帳號申請',
+      'invalid email': '請輸入有效的 Email 格式',
+    };
+    const msg = Object.entries(errMap).find(([k]) => e.message.includes(k));
+    msgEl.textContent = msg ? msg[1] : e.message;
     msgEl.className = 'auth-msg err';
   } finally {
     btn.disabled = false;
