@@ -1286,10 +1286,11 @@ async function proxyFetch(url) {
 
 // 單支股票：使用 v8 chart API（range=5d 以取得前一日成交量作比較）
 async function yfQuote(symbol) {
-  // ★ 台股快取優先：STOCK_DAY_ALL（TSE）或 TPEx openapi（OTC）→ 完全不需 proxy
+  // ★ 台股快取優先順序：即時 MIS > STOCK_DAY_ALL(TSE) > TPEx(OTC)
   const code = symbol.replace(/\.(TW|TWO)$/i, '');
   if (/\.(TW|TWO)$/i.test(symbol)) {
-    if (_twsePriceCache[code])  return _twsePriceCache[code];   // TSE 上市
+    if (_realtimeCache[code])   return _realtimeCache[code];    // MIS 即時（交易時段）
+    if (_twsePriceCache[code])  return _twsePriceCache[code];   // TSE 昨日收盤
     if (_otcPriceCache[code])   return _otcPriceCache[code];    // OTC 上櫃
   }
 
@@ -1823,9 +1824,73 @@ function renderIntl(qm) {
 
 // ==================== 中文股名 + 上市/上櫃股價快取 ====================
 const _twseNameCache  = {};   // code → 中文名
-const _twsePriceCache = {};   // code → quote object（STOCK_DAY_ALL，直接 CORS，零 proxy）
+const _twsePriceCache = {};   // code → quote object（STOCK_DAY_ALL 昨日收盤，直接 CORS）
 const _otcPriceCache  = {};   // code → quote object（TPEx openapi，一次 proxy 拉全部）
+const _realtimeCache  = {};   // code → quote object（MIS 即時，交易時段優先）
 const _otcSet = new Set();   // 已確認為上櫃的代號
+
+// 台股交易時間：週一–五 09:00–13:30（台灣時間 UTC+8）
+function isTradingHours() {
+  const tw  = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Taipei' }));
+  const day = tw.getDay();
+  if (day === 0 || day === 6) return false;
+  const mins = tw.getHours() * 60 + tw.getMinutes();
+  return mins >= 9 * 60 && mins < 13 * 60 + 30;
+}
+
+// TWSE MIS 即時報價（一次 proxy 批次取全部自選股，交易時段使用）
+async function fetchMisRealtime(codes) {
+  if (!codes.length) return;
+  // 依已知分類決定 ex_ 前綴；未知的先試 tse_
+  const mk1 = codes.filter(c => !_otcSet.has(c)).map(c => `tse_${c}.tw`).join('|');
+  const mk2 = codes.filter(c =>  _otcSet.has(c)).map(c => `otc_${c}.tw`).join('|');
+  const exCh = [mk1, mk2].filter(Boolean).join('|');
+  if (!exCh) return;
+
+  const parseItems = (items) => {
+    items.forEach(item => {
+      const code = item.c;
+      if (!code) return;
+      // z = 最新成交；"-" 表示尚無成交，改用 y（昨收）
+      const priceStr = (item.z && item.z !== '-') ? item.z : item.y;
+      const price = parseFloat(priceStr) || 0;
+      if (!price) return;
+      const prev = parseFloat(item.y) || price;
+      const chg  = price - prev;
+      const pct  = prev > 0 ? chg / prev * 100 : 0;
+      const vol  = parseFloat(item.v) || 0;
+      if (item.n && !_twseNameCache[code]) _twseNameCache[code] = item.n;
+      if (item.ex === 'otc') _otcSet.add(code);
+      _realtimeCache[code] = {
+        symbol: code + (item.ex === 'otc' ? '.TWO' : '.TW'),
+        shortName: item.n || code,
+        regularMarketPrice:         price,
+        regularMarketChange:        chg,
+        regularMarketChangePercent: pct,
+        regularMarketVolume:        vol,
+        _realtime: true,
+      };
+    });
+  };
+
+  try {
+    const url = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${encodeURIComponent(exCh)}&json=1&delay=0`;
+    const r   = await proxyFetch(url);
+    const d   = JSON.parse(await r.text());
+    parseItems(d.msgArray || []);
+  } catch (e) { console.warn('[MIS realtime]', e.message); }
+
+  // 補查 tse_ 查不到的（可能是 OTC）
+  const missed = codes.filter(c => !_realtimeCache[c] && !_otcSet.has(c));
+  if (missed.length) {
+    try {
+      const url2 = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${encodeURIComponent(missed.map(c => `otc_${c}.tw`).join('|'))}&json=1&delay=0`;
+      const r2   = await proxyFetch(url2);
+      const d2   = JSON.parse(await r2.text());
+      parseItems(d2.msgArray || []);
+    } catch (_) {}
+  }
+}
 
 function parseName(row) {
   return row.Name || row.StockName || row.CompanyName ||
@@ -1900,12 +1965,14 @@ async function loadTwseList() {
         const n = s => parseFloat(String(s || '').replace(/,/g, '')) || 0;
         const close  = n(row[7]);
         const change = n(row[8]);
-        if (close > 0) {
-          const prev = close - change;
+        // ETF 可能某日零成交 → close=0，改用 open/high/low 其一，或昨收估算
+        const price = close > 0 ? close : (n(row[4]) || n(row[5]) || n(row[6]) || 0);
+        if (price > 0) {
+          const prev = price - change;
           _twsePriceCache[code] = {
             symbol: code + '.TW',
             shortName: name,
-            regularMarketPrice:         close,
+            regularMarketPrice:         price,
             regularMarketChange:        change,
             regularMarketChangePercent: prev > 0 ? change / prev * 100 : 0,
             regularMarketVolume:        n(row[2]) / 1000, // 張
@@ -1992,61 +2059,13 @@ async function fetchTwseNames(stocks) {
 }
 
 // ==================== PORTFOLIO ====================
-async function fetchPortfolio() {
-  const el = id('portGrid');
-  const valid = portfolio.filter(Boolean);
-  if (!valid.length) {
-    setHtml(el, '<p style="grid-column:1/-1;text-align:center;color:var(--text3);padding:1.5rem;font-size:.78rem">點擊「編輯」新增自選股</p>')
-    return;
-  }
-
-  // 有 cache 先顯示，同時背景更新
-  const CACHE_KEY = 'smtm_port_cache';
-  const cached = sessionStorage.getItem(CACHE_KEY);
-  if (cached) {
-    setHtml(el, cached)
-  } else {
-    el.innerHTML = portfolio.map((s, i) => `
-      <div class="stock-card">
-        <div class="s-code">${s || (i+1)+'. 未設定'}</div>
-        <div class="s-name">...</div>
-        <div class="s-price neu" style="font-size:.9rem">載入中</div>
-      </div>`).join('');
-  }
-
-  // ① 先載入所有台股快取（TSE: 零proxy，OTC: 一次proxy）
-  //    確保快取就緒後，yfQuote() 命中快取，不再逐支打 proxy
-  await fetchTwseNames(valid);  // → loadTwseList()(_twsePriceCache) + loadTpexAll()(_otcPriceCache)
-
-  // ② 用快取取得股價（TSE/OTC 皆命中快取 → 零 proxy；其餘才走 YF proxy）
-  const twseSyms = valid.map(s => s + '.TW');
-  const yfResults = await yfQuotes(twseSyms);
-
+function _renderPortHtml() {
   const qm = {};
-  yfResults.forEach(q => {
-    const code = q.symbol.replace(/\.TW$/, '').replace(/\.TWO$/, '');
-    qm[code] = q;
+  portfolio.filter(Boolean).forEach(s => {
+    qm[s] = _realtimeCache[s] || _twsePriceCache[s] || _otcPriceCache[s] || null;
   });
 
-  // ② 對 YF 拿不到的股票，用 TPEx 快取補（上櫃股）
-  valid.forEach(s => {
-    if (!qm[s] && _otcPriceCache[s]) {
-      qm[s] = _otcPriceCache[s];
-    }
-  });
-
-  // ③ 仍缺的：再試 Yahoo .TWO
-  const missing = valid.filter(s => !qm[s]);
-  if (missing.length) {
-    const fb = await yfQuotes(missing.map(s => s + '.TWO'));
-    fb.forEach(q => {
-      const code = q.symbol.replace(/\.TWO$/, '');
-      qm[code] = q;
-      _otcSet.add(code);
-    });
-  }
-
-  const newHtml = portfolio.map((stock, i) => {
+  return portfolio.map((stock, i) => {
     if (!stock) return `
       <div class="stock-card js-open-modal" title="點擊新增">
         <div class="s-code" style="color:var(--text3)">${i+1}. 未設定</div>
@@ -2057,32 +2076,82 @@ async function fetchPortfolio() {
     if (!q) return `
       <div class="stock-card">
         <div class="s-code">${esc(stock)}</div>
-        <div class="s-name">查無資料</div>
+        <div class="s-name" style="color:var(--text3);font-size:.72rem">查詢中…</div>
         <div class="s-price neu">--</div>
       </div>`;
-    const ch  = q.regularMarketChange, pct = q.regularMarketChangePercent;
+    const ch  = q.regularMarketChange || 0;
+    const pct = q.regularMarketChangePercent || 0;
     const dir = ch > 0 ? 'up' : ch < 0 ? 'down' : 'neu';
     const arr = ch > 0 ? '▲' : ch < 0 ? '▼' : '─';
     const cls = ch > 0 ? 'up-card' : ch < 0 ? 'down-card' : '';
-    // 中文股名（優先 TWSE/TPEx，備用 YF shortName，最後用代號）
     const cnName = _twseNameCache[stock] || (q.shortName && !/^\d/.test(q.shortName) ? q.shortName : null) || stock;
-    // 量增減百分比
     let volChgHtml = '';
-    if (q.volChgPct !== null && q.volChgPct !== undefined) {
-      const vd  = q.volChgPct > 0 ? 'up' : q.volChgPct < 0 ? 'down' : 'neu';
-      const va  = q.volChgPct > 0 ? '▲' : q.volChgPct < 0 ? '▼' : '─';
+    if (q.volChgPct != null) {
+      const vd = q.volChgPct > 0 ? 'up' : q.volChgPct < 0 ? 'down' : 'neu';
+      const va = q.volChgPct > 0 ? '▲' : q.volChgPct < 0 ? '▼' : '─';
       volChgHtml = `<span class="${vd}" style="font-size:.62rem;margin-left:.3rem">${va}${Math.abs(q.volChgPct).toFixed(1)}%</span>`;
     }
+    const rtBadge = q._realtime ? '<span style="font-size:.55rem;color:var(--blue);margin-left:.3rem">即時</span>' : '';
     return `
       <div class="stock-card ${cls}">
-        <div class="s-code">${esc(stock)}</div>
+        <div class="s-code">${esc(stock)}${rtBadge}</div>
         <div class="s-name" title="${esc(cnName)}">${esc(cnName)}</div>
         <div class="s-price ${dir}">${fmtN(q.regularMarketPrice, 2)}</div>
         <div class="s-chg ${dir}">${arr} ${Math.abs(ch).toFixed(2)} (${pct>0?'+':''}${pct.toFixed(2)}%)</div>
         <div class="s-vol">量 ${fmtVol(q.regularMarketVolume)}${volChgHtml}</div>
       </div>`;
   }).join('');
-  setHtml(el, newHtml)
+}
+
+async function fetchPortfolio() {
+  const el = id('portGrid');
+  const valid = portfolio.filter(Boolean);
+  if (!valid.length) {
+    setHtml(el, '<p style="grid-column:1/-1;text-align:center;color:var(--text3);padding:1.5rem;font-size:.78rem">點擊「編輯」新增自選股</p>');
+    return;
+  }
+
+  // ① 有 sessionStorage cache 先立刻顯示（不出現 loading）
+  const CACHE_KEY = 'smtm_port_cache';
+  const cached = sessionStorage.getItem(CACHE_KEY);
+  if (cached) {
+    setHtml(el, cached);
+  } else {
+    // 首次載入：用已有快取先渲染骨架（無 spinner）
+    el.classList.remove('loading');
+    el.innerHTML = _renderPortHtml();
+  }
+
+  // ② 載入基礎名稱 + 昨日收盤快取（TSE zero-proxy, OTC one-proxy）
+  await fetchTwseNames(valid);
+
+  // ③ 交易時間 → MIS 即時報價覆蓋快取
+  if (isTradingHours()) {
+    await fetchMisRealtime(valid);
+  }
+
+  // ④ 仍缺資料者 → Yahoo Finance proxy 補查（.TW 先，再 .TWO）
+  const stillMissing = valid.filter(s => !_realtimeCache[s] && !_twsePriceCache[s] && !_otcPriceCache[s]);
+  if (stillMissing.length) {
+    const fb1 = await yfQuotes(stillMissing.map(s => s + '.TW'));
+    fb1.forEach(q => {
+      const code = q.symbol.replace(/\.TW$/, '');
+      _twsePriceCache[code] = q;
+    });
+    const miss2 = stillMissing.filter(s => !_twsePriceCache[s]);
+    if (miss2.length) {
+      const fb2 = await yfQuotes(miss2.map(s => s + '.TWO'));
+      fb2.forEach(q => {
+        const code = q.symbol.replace(/\.TWO$/, '');
+        _otcPriceCache[code] = q;
+        _otcSet.add(code);
+      });
+    }
+  }
+
+  // ⑤ 渲染並存 cache
+  const newHtml = _renderPortHtml();
+  setHtml(el, newHtml);
   sessionStorage.setItem(CACHE_KEY, newHtml);
 }
 
