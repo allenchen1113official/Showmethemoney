@@ -1624,15 +1624,43 @@ async function fetchTxfNear() {
 }
 
 // ==================== MARKET INDICES ====================
+// 國際指數 session 快取（8 分鐘 TTL），避免每次 refresh 都打 proxy
+const _intlCache = {};
+const INTL_TTL   = 8 * 60 * 1000;
+
+async function yfQuoteIndexCached(symbol) {
+  const now = Date.now();
+  const hit = _intlCache[symbol];
+  if (hit && now - hit.ts < INTL_TTL) return hit.data;
+  const q = await yfQuoteIndex(symbol);
+  if (q) _intlCache[symbol] = { data: q, ts: now };
+  return q;
+}
+
 async function fetchMarkets() {
   const intSyms = ['^TWII', '^N225', '^KS11', '^DJI', '^GSPC', '^IXIC'];
+
+  // 先渲染現有快取（讓畫面立刻有資料）
+  const cachedQm = {};
+  intSyms.forEach(s => { if (_intlCache[s]?.data) cachedQm[_intlCache[s].data.symbol] = _intlCache[s].data; });
+  if (Object.keys(cachedQm).length) { renderTW(cachedQm); renderIntl(cachedQm); }
+
+  // 需要重新 fetch 的（快取過期或第一次）
+  const stale = intSyms.filter(s => {
+    const hit = _intlCache[s];
+    return !hit || Date.now() - hit.ts >= INTL_TTL;
+  });
+
+  // 錯開 200ms 間隔，避免 6 支同時打 proxy 觸發 rate limit
+  const delay = ms => new Promise(r => setTimeout(r, ms));
   const [idxResults, tpex, txf] = await Promise.all([
-    Promise.allSettled(intSyms.map(s => yfQuoteIndex(s))),
+    Promise.allSettled(stale.map((s, i) => delay(i * 250).then(() => yfQuoteIndexCached(s)))),
     fetchTpexIndex(),
     fetchTxfNear(),
     fetchInstitutional(),
   ]);
-  const qm = {};
+
+  const qm = { ...cachedQm };
   idxResults.forEach(r => { if (r.status === 'fulfilled' && r.value) qm[r.value.symbol] = r.value; });
   if (tpex) qm['^TPEX'] = tpex;
   if (txf)  qm['TXF']   = txf;
@@ -2610,12 +2638,19 @@ async function refreshAll() {
   const btn = id('refreshBtn');
   if (btn) { btn.classList.add('spinning'); btn.disabled = true; }
 
-  fetchFinCal(); // 同步，不需 await
-  // fetchPortfolio 先跑（填充 _twseNameCache），完成後再跑 fetchPortNews
+  fetchFinCal(); // 非 proxy，不等
+
+  // 第一波：台灣市場（TWS MIS / BFI82U）+ 景氣燈號 + 自選股（MIS 即時）
+  // 這些都打 TWSE 系的 proxy，先讓它們跑完
   await Promise.allSettled([
     fetchTL(),
     fetchMarkets(),
     fetchPortfolio().then(() => fetchPortNews()),
+  ]);
+
+  // 第二波：國際（Yahoo 各指數已錯開 250ms） + 社群（Reddit/PTT/財經）
+  // 此時 cors.lol rate limit 已釋放
+  await Promise.allSettled([
     fetchReddit(),
     fetchPTT(),
     fetchFinanceNews(),
