@@ -1129,17 +1129,46 @@ async function handleAuthSubmit() {
     }
     closeAuthModal();
   } catch (e) {
+    const em = e.message || '';
+    // Email rate limit → show setup instructions
+    if (em.toLowerCase().includes('email rate limit') || em.toLowerCase().includes('rate limit')) {
+      id('authSubmitBtn').style.display = 'none';
+      msgEl.innerHTML = `
+        <div style="text-align:center;padding:0.4rem 0">
+          <div style="font-size:1.5rem;margin-bottom:0.3rem">⚠️</div>
+          <div style="font-weight:700;margin-bottom:0.4rem;color:#f0883e">發信次數已達上限</div>
+          <div style="color:var(--text2);font-size:0.78rem;line-height:1.6;text-align:left">
+            Supabase 免費方案每小時限制發送確認信 3 封。<br>
+            <strong>建議關閉 Email 確認功能（一次性設定）：</strong><br>
+            <span style="font-family:monospace;font-size:0.72rem">
+              Supabase → Authentication<br>
+              → Providers → Email<br>
+              → 關閉「Confirm email」
+            </span><br><br>
+            關閉後，註冊即可直接登入，不需收信確認。
+          </div>
+        </div>`;
+      msgEl.className = 'auth-msg';
+      id('authToggle').textContent = '返回登入';
+      id('authToggle').onclick = () => {
+        id('authSubmitBtn').style.display = '';
+        id('authToggle').onclick = toggleAuthMode;
+        toggleAuthMode();
+      };
+      return;
+    }
     // Translate common Supabase errors to Chinese
-    const errMap = {
-      'Invalid login credentials': '帳號或密碼錯誤',
-      'Email not confirmed': '請先至信箱點擊確認連結後再登入',
-      'User already registered': '此 Email 已註冊，請直接登入',
-      'Password should be at least 6 characters': '密碼至少需要 6 個字元',
-      'signup is disabled': '目前暫停開放新帳號申請',
-      'invalid email': '請輸入有效的 Email 格式',
-    };
-    const msg = Object.entries(errMap).find(([k]) => e.message.includes(k));
-    msgEl.textContent = msg ? msg[1] : e.message;
+    const errMap = [
+      ['Invalid login credentials',               '帳號或密碼錯誤'],
+      ['Email not confirmed',                      '請先至信箱點擊確認連結後再登入'],
+      ['User already registered',                  '此 Email 已註冊，請直接登入'],
+      ['Password should be at least 6 characters', '密碼至少需要 6 個字元'],
+      ['signup is disabled',                       '目前暫停開放新帳號申請'],
+      ['invalid email',                            '請輸入有效的 Email 格式'],
+      ['email address invalid',                    '請輸入有效的 Email 格式'],
+    ];
+    const found = errMap.find(([k]) => em.toLowerCase().includes(k.toLowerCase()));
+    msgEl.textContent = found ? found[1] : em;
     msgEl.className = 'auth-msg err';
   } finally {
     btn.disabled = false;
