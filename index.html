@@ -1644,34 +1644,58 @@ async function yfQuoteIndexCached(symbol) {
   return q;
 }
 
+// _mktsQm 為全域，讓每次 render 都從同一個物件累積
+const _mktsQm = {};
+
+function _renderMarkets(tpex, txf) {
+  if (tpex) _mktsQm['^TPEX'] = tpex;
+  if (txf)  _mktsQm['TXF']   = txf;
+  // 用 _intlCache 補回所有已知資料（防止 local qm 遺漏）
+  ['^TWII','^N225','^KS11','^DJI','^GSPC','^IXIC'].forEach(s => {
+    if (_intlCache[s]?.data && !_mktsQm[_intlCache[s].data.symbol]) {
+      _mktsQm[_intlCache[s].data.symbol] = _intlCache[s].data;
+    }
+  });
+  renderTW(_mktsQm);
+  renderIntl(_mktsQm);
+}
+
 async function fetchMarkets() {
   const intSyms = ['^TWII', '^N225', '^KS11', '^DJI', '^GSPC', '^IXIC'];
   const delay   = ms => new Promise(r => setTimeout(r, ms));
 
-  // qm 持續更新，每有新資料就重渲染
-  const qm = {};
-  intSyms.forEach(s => { if (_intlCache[s]?.data) qm[_intlCache[s].data.symbol] = _intlCache[s].data; });
-  if (Object.keys(qm).length) { renderTW(qm); renderIntl(qm); }
+  // 有快取先渲染
+  intSyms.forEach(s => { if (_intlCache[s]?.data) _mktsQm[_intlCache[s].data.symbol] = _intlCache[s].data; });
+  if (Object.keys(_mktsQm).length) { renderTW(_mktsQm); renderIntl(_mktsQm); }
 
-  // 各指數 250ms 錯開，每拿到一個立即 render（不等其他人）
+  // 各指數 250ms 錯開，每拿到一個立即更新 _mktsQm 並 render
   const idxPromises = intSyms.map((s, i) =>
-    delay(i * 250).then(() => yfQuoteIndexCached(s)).then(q => {
-      if (q) { qm[q.symbol] = q; renderTW(qm); renderIntl(qm); }
-    }).catch(() => {})
+    delay(i * 250)
+      .then(() => yfQuoteIndexCached(s))
+      .then(q => { if (q) { _mktsQm[q.symbol] = q; renderTW(_mktsQm); renderIntl(_mktsQm); } })
+      .catch(() => {})
   );
 
-  // TPEx / TXF / 三大法人 並行跑（不等指數）
+  // TPEx / TXF / 三大法人 並行
   const [tpex, txf] = await Promise.all([
     fetchTpexIndex(),
     fetchTxfNear(),
     fetchInstitutional(),
-    ...idxPromises,   // 一起等所有指數完成
+    ...idxPromises,
   ]);
 
-  if (tpex) qm['^TPEX'] = tpex;
-  if (txf)  qm['TXF']   = txf;
-  renderTW(qm);
-  renderIntl(qm);
+  _renderMarkets(tpex, txf);
+
+  // 失敗的指數 5 秒後重試一次（rate limit 釋放後）
+  const failed = intSyms.filter(s => !_intlCache[s]);
+  if (failed.length) {
+    delay(5000).then(async () => {
+      await Promise.allSettled(failed.map(s => yfQuoteIndexCached(s).then(q => {
+        if (q) { _mktsQm[q.symbol] = q; }
+      })));
+      _renderMarkets(null, null);
+    });
+  }
 }
 
 // ==================== 三大法人買賣超 ====================
@@ -2640,29 +2664,33 @@ function switchTab(tabEl, paneId) {
 }
 
 // ==================== REFRESH ====================
+let _refreshing = false;
 async function refreshAll() {
+  if (_refreshing) return;   // 避免並發
+  _refreshing = true;
   const btn = id('refreshBtn');
   if (btn) { btn.classList.add('spinning'); btn.disabled = true; }
 
-  fetchFinCal(); // 非 proxy，不等
+  try {
+    fetchFinCal(); // 非 proxy，不等
 
-  // 第一波：台灣市場（TWS MIS / BFI82U）+ 景氣燈號 + 自選股（MIS 即時）
-  // 這些都打 TWSE 系的 proxy，先讓它們跑完
-  await Promise.allSettled([
-    fetchTL(),
-    fetchMarkets(),
-    fetchPortfolio().then(() => fetchPortNews()),
-  ]);
+    // 第一波：景氣燈號 + 自選股（MIS 即時）— TWSE 系，先跑完釋放 proxy
+    await Promise.allSettled([
+      fetchTL(),
+      fetchPortfolio().then(() => fetchPortNews()),
+    ]);
 
-  // 第二波：國際（Yahoo 各指數已錯開 250ms） + 社群（Reddit/PTT/財經）
-  // 此時 cors.lol rate limit 已釋放
-  await Promise.allSettled([
-    fetchReddit(),
-    fetchPTT(),
-    fetchFinanceNews(),
-  ]);
-
-  if (btn) { btn.classList.remove('spinning'); btn.disabled = false; }
+    // 第二波：台灣市場（包含各指數 250ms 錯開）+ 社群（rate limit 已部分釋放）
+    await Promise.allSettled([
+      fetchMarkets(),
+      fetchReddit(),
+      fetchPTT(),
+      fetchFinanceNews(),
+    ]);
+  } finally {
+    _refreshing = false;
+    if (btn) { btn.classList.remove('spinning'); btn.disabled = false; }
+  }
 }
 
 // ==================== UTILS ====================
