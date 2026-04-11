@@ -1525,51 +1525,20 @@ async function fetchTpexIndex() {
     }
   } catch (_) {}
 
-  // ② Yahoo Finance ^TWO — 用 v8 chart raw data 直接取 prevClose 計算漲跌
+  // ② info.tpex.org.tw/api/mktRT — 含收盤後仍正確的當日 OTC 指數
   try {
-    const url = CFG.yfChart + '%5ETWO?interval=1d&range=5d';
-    const r = await proxyFetch(url);
+    const r = await proxyFetch('https://info.tpex.org.tw/api/mktRT');
     const d = JSON.parse(await r.text());
-    const result = d.chart?.result?.[0];
-    const meta   = result?.meta;
-    if (meta?.regularMarketPrice > 50) {
-      const price = meta.regularMarketPrice;
-      const prev  = meta.chartPreviousClose || meta.regularMarketPreviousClose || 0;
-      // 計算真實漲跌（不信任 meta.regularMarketChange，可能為 0）
-      const chg   = prev > 0 ? price - prev : 0;
-      const pct   = prev > 0 ? chg / prev * 100 : 0;
-      return mkQ(price, chg, pct);
+    const t = d.taiex;          // 'taiex' key 實際存放 OTC 指數
+    if (t && parseFloat(t.index) > 50) {
+      const price = parseFloat(t.index);
+      const diff  = parseFloat(t.diff)    || 0;
+      const pct   = parseFloat(t.percent) || 0;
+      return mkQ(price, diff, pct);
     }
   } catch (_) {}
 
-  // ③ TPEx openapi daily close quotes（有 CORS，直接 fetch）
-  //    從 NextReferencePrice = 今日收盤，Change = 今日漲跌，推算指數
-  try {
-    const r = await fetch('https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes',
-      { signal: AbortSignal.timeout(8000) });
-    const rows = JSON.parse(await r.text());
-    if (Array.isArray(rows) && rows.length > 500) {
-      const n = s => parseFloat(String(s||'0').replace(/[+,\s]/g,'')) || 0;
-      // 取加權市值計算：sum(Close * Capitals) / sum(Capitals)
-      let sumVal = 0, sumCap = 0, sumChgVal = 0;
-      rows.forEach(row => {
-        const close = n(row.Close);
-        const cap   = n(row.Capitals);
-        const chg   = n(row.Change);
-        if (close > 0 && cap > 0) { sumVal += close * cap; sumCap += cap; sumChgVal += chg * cap; }
-      });
-      // 這不等於 TPEx 指數，但可提供漲跌方向；實際指數從 session storage 取
-      const saved = JSON.parse(sessionStorage.getItem(_SS_TPEX) || 'null');
-      if (saved?.regularMarketPrice > 50 && sumCap > 0) {
-        const avgChg = sumChgVal / sumCap; // 加權平均漲跌（方向）
-        const price  = saved.regularMarketPrice;
-        const chgEst = avgChg > 0 ? Math.abs(price * avgChg / 100) : avgChg < 0 ? -Math.abs(price * avgChg / 100) : 0;
-        return mkQ(price, chgEst, price > 0 ? chgEst / (price - chgEst) * 100 : 0);
-      }
-    }
-  } catch (_) {}
-
-  // ④ 上次已知值（session storage）
+  // ③ 上次已知值（session storage）
   try {
     const saved = JSON.parse(sessionStorage.getItem(_SS_TPEX) || 'null');
     if (saved?.regularMarketPrice) return saved;
@@ -1633,18 +1602,7 @@ async function fetchTxfNear() {
     }
   } catch (_) {}
 
-  // ③ Yahoo Finance 備援（TXF1=F 近月合約）
-  for (const sym of ['TXF1=F', 'FITX=F']) {
-    try {
-      const q = await yfQuoteIndex(sym);
-      if (q?.regularMarketPrice > 0) {
-        q.symbol = 'TXF'; q.shortName = '台指近月';
-        return mkQ({ price: q.regularMarketPrice, chg: q.regularMarketChange, pct: q.regularMarketChangePercent, vol: 0 });
-      }
-    } catch (_) {}
-  }
-
-  // ④ 上次已知值（session storage）
+  // ③ 上次已知值（session storage）
   try {
     const saved = JSON.parse(sessionStorage.getItem(_SS_TXF) || 'null');
     if (saved?.regularMarketPrice) return saved;
