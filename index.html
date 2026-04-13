@@ -1581,16 +1581,86 @@ async function fetchTxfNear() {
     }
   } catch (_) {}
 
-  // ② TAIFEX MIS（直接 POST，不過 proxy）
+  // ② TAIFEX OpenAPI DailyFuturesQuotes（GET → proxy 可用）
   try {
-    for (const mc of ['0', '1']) {
-      const r = await fetch('https://mis.taifex.com.tw/futures/api/getQuoteList', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ MarketCode: mc, CommodityID: 'TXF', RowCount: 10, PageNo: 1 }),
-        signal: AbortSignal.timeout(6000),
-      });
-      if (!r.ok) continue;
+    const r = await proxyFetch('https://openapi.taifex.com.tw/v1/DailyFuturesQuotes?CommodityID=TXF');
+    const rows = JSON.parse(await r.text());
+    if (Array.isArray(rows) && rows.length) {
+      // 近月 = 成交量最大的合約
+      const best = rows.reduce((a, b) =>
+        (parseFutPrice(b)?.vol || 0) > (parseFutPrice(a)?.vol || 0) ? b : a);
+      const parsed = parseFutPrice(best);
+      if (parsed?.price > 0) return mkQ(parsed);
+    }
+  } catch (_) {}
+
+  // ③ TAIFEX MIS POST MarketCode=0（日盤，瀏覽器可能因 CORS 失敗）
+  try {
+    const r = await fetch('https://mis.taifex.com.tw/futures/api/getQuoteList', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ MarketCode: '0', CommodityID: 'TXF', RowCount: 10, PageNo: 1 }),
+      signal: AbortSignal.timeout(6000),
+    });
+    if (r.ok) {
+      const d = JSON.parse(await r.text());
+      const list = ((d.RtData || d.RtnData || d.Data || {}).QuoteList || []);
+      const item = list.find(i => (i.SymbolID||'').startsWith('TXF') && (i.SymbolID||'').includes('-F'))
+                || list.find(i => (i.SymbolID||'').startsWith('TXF'));
+      if (item) {
+        const parsed = parseFutPrice({
+          ClosingPrice: item.CLastPrice || item.SettlementPrice,
+          ReferencePrice: item.CRefPrice,
+          Change: item.CDiff,
+          Volume: item.CTotalVolume,
+        });
+        if (parsed?.price > 0) return mkQ(parsed);
+      }
+    }
+  } catch (_) {}
+
+  // ④ 上次已知值（session storage）
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(_SS_TXF) || 'null');
+    if (saved?.regularMarketPrice) return saved;
+  } catch (_) {}
+
+  return null;
+}
+
+// ==================== 台指夜盤（TXF Night）====================
+const _SS_TXFN = 'smtm_txfn_last';
+async function fetchTxfNight() {
+  const mkQ = (p) => {
+    const q = { symbol: 'TXFN', regularMarketPrice: p.price,
+      regularMarketChange: p.chg, regularMarketChangePercent: p.pct,
+      regularMarketVolume: p.vol || 0, volChgPct: null,
+      regularMarketTime: Math.floor(Date.now() / 1000), shortName: '台指夜盤' };
+    try { sessionStorage.setItem(_SS_TXFN, JSON.stringify(q)); } catch(_) {}
+    return q;
+  };
+
+  // ① TAIFEX OpenAPI NightFuturesQuotes（GET → proxy 可用）
+  try {
+    const r = await proxyFetch('https://openapi.taifex.com.tw/v1/NightFuturesQuotes?CommodityID=TXF');
+    const rows = JSON.parse(await r.text());
+    if (Array.isArray(rows) && rows.length) {
+      const best = rows.reduce((a, b) =>
+        (parseFutPrice(b)?.vol || 0) > (parseFutPrice(a)?.vol || 0) ? b : a);
+      const parsed = parseFutPrice(best);
+      if (parsed?.price > 0) return mkQ(parsed);
+    }
+  } catch (_) {}
+
+  // ② TAIFEX MIS POST MarketCode=1（夜盤，瀏覽器可能因 CORS 失敗）
+  try {
+    const r = await fetch('https://mis.taifex.com.tw/futures/api/getQuoteList', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ MarketCode: '1', CommodityID: 'TXF', RowCount: 10, PageNo: 1 }),
+      signal: AbortSignal.timeout(6000),
+    });
+    if (r.ok) {
       const d = JSON.parse(await r.text());
       const list = ((d.RtData || d.RtnData || d.Data || {}).QuoteList || []);
       const item = list.find(i => (i.SymbolID||'').startsWith('TXF') && (i.SymbolID||'').includes('-F'))
@@ -1609,11 +1679,11 @@ async function fetchTxfNear() {
 
   // ③ 上次已知值（session storage）
   try {
-    const saved = JSON.parse(sessionStorage.getItem(_SS_TXF) || 'null');
+    const saved = JSON.parse(sessionStorage.getItem(_SS_TXFN) || 'null');
     if (saved?.regularMarketPrice) return saved;
   } catch (_) {}
 
-  return null;
+  return null;  // 夜盤休市或無法取得時返回 null，顯示 "--"
 }
 
 // ==================== MARKET INDICES ====================
@@ -1633,9 +1703,10 @@ async function yfQuoteIndexCached(symbol) {
 // _mktsQm 為全域，讓每次 render 都從同一個物件累積
 const _mktsQm = {};
 
-function _renderMarkets(tpex, txf) {
-  if (tpex) _mktsQm['^TPEX'] = tpex;
-  if (txf)  _mktsQm['TXF']   = txf;
+function _renderMarkets(tpex, txf, txfNight) {
+  if (tpex)     _mktsQm['^TPEX'] = tpex;
+  if (txf)      _mktsQm['TXF']   = txf;
+  if (txfNight) _mktsQm['TXFN']  = txfNight;
   // 用 _intlCache 補回所有已知資料（防止 local qm 遺漏）
   ['^TWII','^N225','^KS11','^DJI','^GSPC','^IXIC'].forEach(s => {
     if (_intlCache[s]?.data && !_mktsQm[_intlCache[s].data.symbol]) {
@@ -1662,15 +1733,16 @@ async function fetchMarkets() {
       .catch(() => {})
   );
 
-  // TPEx / TXF / 三大法人 並行
-  const [tpex, txf] = await Promise.all([
+  // TPEx / TXF 日盤 / TXF 夜盤 / 三大法人 並行
+  const [tpex, txf, txfNight] = await Promise.all([
     fetchTpexIndex(),
     fetchTxfNear(),
+    fetchTxfNight(),
     fetchInstitutional(),
     ...idxPromises,
   ]);
 
-  _renderMarkets(tpex, txf);
+  _renderMarkets(tpex, txf, txfNight);
 
   // 失敗的指數 5 秒後重試一次（rate limit 釋放後）
   const failed = intSyms.filter(s => !_intlCache[s]);
@@ -1679,7 +1751,7 @@ async function fetchMarkets() {
       await Promise.allSettled(failed.map(s => yfQuoteIndexCached(s).then(q => {
         if (q) { _mktsQm[q.symbol] = q; }
       })));
-      _renderMarkets(null, null);
+      _renderMarkets(null, null, null);
     });
   }
 }
@@ -1815,11 +1887,12 @@ function mktItem(q, flag, name, sub) {
 
 function renderTW(qm) {
   const el = id('twMkt');
-  const taiex = qm['^TWII'], tpex = qm['^TPEX'], txf = qm['TXF'];
+  const taiex = qm['^TWII'], tpex = qm['^TPEX'], txf = qm['TXF'], txfNight = qm['TXFN'];
   setHtml(el,
-    mktItem(taiex, '🇹🇼', '台灣加權指數', 'TAIEX') +
-    mktItem(tpex,  '🏪',  '櫃買指數',     'TPEx')  +
-    mktItem(txf,   '📊',  '台指近月',     'TXF'));
+    mktItem(taiex,    '🇹🇼', '台灣加權指數', 'TAIEX')    +
+    mktItem(tpex,     '🏪',  '櫃買指數',     'TPEx')     +
+    mktItem(txf,      '📊',  '台指近月',     'TXF Day')  +
+    mktItem(txfNight, '🌙',  '台指夜盤',     'TXF Night'));
   id('twTs').textContent = taiex ? fmtTs(taiex.regularMarketTime * 1000) : '';
 }
 
@@ -2559,7 +2632,13 @@ async function fetchFinanceNews() {
   res.forEach(r => { if (r.status === 'fulfilled') allItems.push(...r.value); });
 
   if (!allItems.length) {
-    setHtml(el, '<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 財經新聞載入失敗<br><small>請稍後重試</small></div>');
+    // 載入失敗：優先展示上次快取，避免版面空白
+    if (_finCache.html) {
+      setHtml(el, _finCache.html +
+        '<p style="font-size:.65rem;color:var(--text3);text-align:center;margin-top:.4rem">（快取資料）</p>');
+    } else {
+      setHtml(el, '<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 財經新聞載入失敗<br><small>請稍後重試</small></div>');
+    }
     return;
   }
 
