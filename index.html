@@ -1566,11 +1566,16 @@ async function fetchTxfNear() {
     const d = JSON.parse(await r.text());
     const m = (d.msgArray || [])[0];
     if (m) {
-      const price = parseFloat((m.z && m.z !== '-') ? m.z : (m.pz || 0));
-      const prev  = parseFloat((m.y && m.y !== '-') ? m.y : 0);
+      const zOk  = m.z  && m.z  !== '-';
+      const pzOk = m.pz && m.pz !== '-';
+      const yOk  = m.y  && m.y  !== '-';
+      // 盤中用成交價，盤後 z/pz 皆 "-" 時退回昨收（pz）顯示參考值
+      const price = parseFloat(zOk ? m.z : pzOk ? m.pz : yOk ? m.y : 0);
+      const prev  = parseFloat(yOk ? m.y : 0);
       if (price > 0) {
-        const chg = prev > 0 ? price - prev : 0;
-        const pct = prev > 0 ? chg / prev * 100 : 0;
+        // 只有當天有成交才計算漲跌；純昨收參考值則顯示 0
+        const chg = (zOk || pzOk) && prev > 0 ? price - prev : 0;
+        const pct = (zOk || pzOk) && prev > 0 ? chg / prev * 100 : 0;
         return mkQ({ price, chg, pct, vol: parseFloat(m.v || 0) });
       }
     }
@@ -2194,36 +2199,36 @@ async function fetchPortfolio() {
   sessionStorage.setItem(CACHE_KEY, newHtml);
 }
 
-// ==================== PORTFOLIO NEWS (Google News RSS) ====================
-// 解析 Google News RSS <link>
-// Google News RSS 的 <link> 是普通文字節點，DOMParser 解析後 textContent 即 URL
-function gnLink(item) {
-  // 方法①：<link> textContent（最可靠）
-  const links = item.getElementsByTagName('link');
-  for (let i = 0; i < links.length; i++) {
-    const tc = links[i].textContent?.trim();
-    if (tc && tc.startsWith('http')) return tc;
-    // 某些 parser 把 URL 放在 nextSibling text node
-    const nv = links[i].nextSibling?.nodeValue?.trim();
-    if (nv && nv.startsWith('http')) return nv;
-  }
-  // 方法②：<guid>（Google News 的 guid 通常也是文章 URL）
-  const guids = item.getElementsByTagName('guid');
-  for (let i = 0; i < guids.length; i++) {
-    const g = guids[i].textContent?.trim();
-    if (g && g.startsWith('http')) return g;
-  }
-  return '';
+// ==================== PORTFOLIO NEWS (Yahoo Finance search) ====================
+// Google News RSS 已被各 proxy 封鎖（回傳 Google "Sorry..." HTML）
+// 改用 Yahoo Finance /v1/finance/search，回傳 JSON，proxy 可正常傳遞
+async function _yfNewsSearch(query, count = 5) {
+  // 直接 CORS fetch 優先，不成功再走 proxy
+  const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(query)}&lang=zh-TW&region=TW&quotesCount=0&newsCount=${count}&enableFuzzyQuery=false`;
+  let text;
+  try {
+    const r = await proxyFetch(url);
+    text = await r.text();
+  } catch (_) { return []; }
+  try {
+    const d = JSON.parse(text);
+    return (d.news || []).map(n => ({
+      title:     n.title || '',
+      link:      n.link  || '',
+      publisher: n.publisher || '',
+      _ts:       (n.providerPublishTime || 0) * 1000,
+    })).filter(n => n.title && n.link);
+  } catch (_) { return []; }
 }
 
 async function fetchPortNews() {
   const el = id('portNews');
   const valid = portfolio.filter(Boolean);
   if (!valid.length) {
-    setHtml(el, '<p style="text-align:center;color:var(--text3);font-size:.78rem;padding:1rem">請先設定自選股</p>')
+    setHtml(el, '<p style="text-align:center;color:var(--text3);font-size:.78rem;padding:1rem">請先設定自選股</p>');
     return;
   }
-  setHtml(el, '<div class="loading"><i class="fa-solid fa-circle-notch"></i> 載入中...</div>')
+  setHtml(el, '<div class="loading"><i class="fa-solid fa-circle-notch"></i> 載入中...</div>');
 
   // 確保中文名稱已填（若從 refreshAll 呼叫則已由 fetchPortfolio 完成）
   await fetchTwseNames(valid);
@@ -2231,26 +2236,16 @@ async function fetchPortNews() {
   const allItems = [];
   const seen = new Set();
 
-  // 每支股票查一次 Google News RSS（代號 + 中文名）
-  const jobs = valid.slice(0, 10).map(async stock => {
+  // 每支股票：優先用「台股代號.TW」搜尋（Yahoo Finance 直接對應到股票新聞）；
+  // 同時以中文名稱補充（代號 + 中文名並行）
+  const jobs = valid.slice(0, 10).flatMap(stock => {
     const cnName = _twseNameCache[stock] || '';
-    const q = cnName ? `${cnName}` : stock;   // 優先用中文名搜尋
-    const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant`;
-    try {
-      const r = await proxyFetch(rssUrl);
-      const text = await r.text();
-      const xml = new DOMParser().parseFromString(text, 'text/xml');
-      if (xml.querySelector('parsererror')) throw new Error('parse error');
-      const items = Array.from(xml.getElementsByTagName('item')).slice(0, 4);
-      return items.map(item => ({
-        _ticker: stock,
-        _name:   cnName || stock,
-        title:   item.querySelector('title')?.textContent?.trim() || '',
-        link:    gnLink(item),
-        publisher: item.querySelector('source')?.textContent?.trim() || '',
-        _ts:     new Date(item.querySelector('pubDate')?.textContent || 0).getTime() || 0,
-      })).filter(n => n.title);
-    } catch (_) { return []; }
+    const queries = [`${stock}.TW`];
+    if (cnName) queries.push(cnName);
+    return queries.map(async q => {
+      const items = await _yfNewsSearch(q, 5);
+      return items.map(n => ({ ...n, _ticker: stock, _name: cnName || stock }));
+    });
   });
 
   const res = await Promise.allSettled(jobs);
@@ -2262,7 +2257,7 @@ async function fetchPortNews() {
     .slice(0, 20);
 
   if (!top.length) {
-    setHtml(el, `<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 暫無相關新聞<br><small style="color:var(--text3)">請確認自選股已設定</small></div>`)
+    setHtml(el, `<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 暫無相關新聞<br><small style="color:var(--text3)">請確認自選股已設定</small></div>`);
     return;
   }
 
@@ -2445,62 +2440,84 @@ async function fetchReddit() {
   }).join(''));
 }
 
-// ==================== PTT (Atom format) ====================
-// PTT rss.ptt.cc 實際為 Atom 格式：<feed>/<entry>，非 RSS 2.0 <channel>/<item>
+// ==================== PTT (HTML scraping) ====================
+// rss.ptt.cc 已停止服務（404），改爬 PTT Stock 板 HTML index
 // 快取 5 分鐘，避免頻繁呼叫被限速
 const _pttCache = { ts: 0, html: '' };
 const PTT_TTL   = 5 * 60 * 1000;
+
+// proxyFetch 的 isGood 會過濾 HTML（<!DOCTYPE / <html），
+// 故使用獨立的 helper 直接取得 HTML 內容
+async function _fetchPttHtml() {
+  const pttUrl = 'https://www.ptt.cc/bbs/Stock/index.html';
+  const hasEnt = t => typeof t === 'string' && t.includes('r-ent');
+
+  // Promise.any：三個 proxy 並行，最快有效結果勝出
+  return Promise.any([
+    // allorigins /get 回傳 JSON 包裝，response 不以 <html 開頭
+    fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(pttUrl)}`,
+          { signal: AbortSignal.timeout(12000) })
+      .then(r => r.json())
+      .then(d => { if (hasEnt(d.contents)) return d.contents; throw new Error('no r-ent'); }),
+    // cors.lol 回傳原始 HTML
+    fetch(`https://api.cors.lol/?url=${encodeURIComponent(pttUrl)}`,
+          { signal: AbortSignal.timeout(12000) })
+      .then(r => r.text())
+      .then(t => { if (hasEnt(t)) return t; throw new Error('no r-ent'); }),
+    // codetabs 回傳原始 HTML
+    fetch(`https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(pttUrl)}`,
+          { signal: AbortSignal.timeout(12000) })
+      .then(r => r.text())
+      .then(t => { if (hasEnt(t)) return t; throw new Error('no r-ent'); }),
+  ]);
+}
 
 async function fetchPTT() {
   const el = id('pttContent');
 
   // 有效快取直接使用
   if (_pttCache.html && Date.now() - _pttCache.ts < PTT_TTL) {
-    setHtml(el, _pttCache.html)
+    setHtml(el, _pttCache.html);
     return;
   }
 
   try {
-    const r = await proxyFetch('http://rss.ptt.cc/Stock.xml');
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const text = await r.text();
+    const htmlText = await _fetchPttHtml();
+    const doc  = new DOMParser().parseFromString(htmlText, 'text/html');
+    const ents = Array.from(doc.querySelectorAll('div.r-ent'));
+    if (!ents.length) throw new Error('No .r-ent found');
 
-    const xml = new DOMParser().parseFromString(text, 'text/xml');
-    if (xml.querySelector('parsererror')) throw new Error('XML parse error');
+    // PTT index 由舊到新排列，reverse 後取最新的前 8 篇
+    const posts = ents.reverse().slice(0, 8).map(ent => {
+      const titleEl = ent.querySelector('div.title a');
+      if (!titleEl) return null; // 已刪除貼文
+      const href   = titleEl.getAttribute('href') || '';
+      const url    = href ? `https://www.ptt.cc${href}` : 'https://www.ptt.cc/bbs/Stock/';
+      const title  = titleEl.textContent?.trim() || '';
+      const author = ent.querySelector('div.author')?.textContent?.trim() || '';
+      const date   = ent.querySelector('div.date')?.textContent?.trim() || '';
+      const nrecEl = ent.querySelector('div.nrec span');
+      const nrec   = nrecEl?.textContent?.trim() || '';
+      return { title, url, author, date, nrec };
+    }).filter(Boolean);
 
-    // Atom 格式：文章為 <entry>
-    const entries = xml.getElementsByTagName('entry');
-    if (!entries.length) throw new Error('No <entry> found in Atom feed');
-
-    const posts = Array.from(entries).slice(0, 5).map(entry => {
-      // Atom <link> 用 href 屬性，不是文字內容
-      const linkEl = entry.querySelector('link[rel="alternate"]') || entry.querySelector('link');
-      const url    = linkEl?.getAttribute('href') || '';
-      // 作者：<author><name>
-      const author = entry.getElementsByTagName('name')[0]?.textContent?.trim() || '';
-      // 時間：<published> 或 <updated>
-      const pubRaw = entry.getElementsByTagName('published')[0]?.textContent?.trim()
-                  || entry.getElementsByTagName('updated')[0]?.textContent?.trim() || '';
-      return {
-        title: entry.getElementsByTagName('title')[0]?.textContent?.trim() || '',
-        url, author, pubRaw,
-      };
-    });
+    if (!posts.length) throw new Error('No valid posts');
 
     const html = posts.map(p => `
       <div class="ptt-item">
-        <a href="${p.url || 'https://www.ptt.cc/bbs/Stock/'}" target="_blank" rel="noopener">
+        <a href="${p.url}" target="_blank" rel="noopener">
           <div class="ptt-title">${esc(p.title)}</div>
         </a>
         <div class="ptt-meta">
           <span class="ptt-author"><i class="fa-regular fa-user"></i> ${esc(p.author)}</span>
-          <span class="ntime">${p.pubRaw ? ago(new Date(p.pubRaw).getTime()) : ''}</span>
+          ${p.nrec ? `<span class="ptt-push" style="color:var(--up);margin-left:.4rem">${esc(p.nrec)}</span>` : ''}
+          <span class="ntime">${esc(p.date)}</span>
         </div>
       </div>`).join('');
 
     _pttCache.html = html;
     _pttCache.ts   = Date.now();
-    setHtml(el, html)
+    setHtml(el, html);
 
   } catch (e) {
     console.warn('[PTT]', e.message);
@@ -2510,14 +2527,14 @@ async function fetchPTT() {
     } else {
       setHtml(el, `<div class="err">
         <i class="fa-solid fa-triangle-exclamation"></i> PTT 載入失敗<br>
-        <a href="https://www.ptt.cc/bbs/Stock/" target="_blank">前往 PTT Stock 板</a>
+        <a href="https://www.ptt.cc/bbs/Stock/" target="_blank" rel="noopener">前往 PTT Stock 板</a>
       </div>`);
     }
   }
 }
 
-// ==================== FINANCE NEWS (Google News RSS) ====================
-// Google News RSS: stable, supports Chinese keywords, no API key needed
+// ==================== FINANCE NEWS (Yahoo Finance search) ====================
+// Google News RSS 被 proxy 封鎖；改用 Yahoo Finance /v1/finance/search（JSON）
 const _finCache = { ts: 0, html: '' };
 const FIN_TTL   = 5 * 60 * 1000;
 
@@ -2525,58 +2542,28 @@ async function fetchFinanceNews() {
   const el = id('finContent');
 
   if (_finCache.html && Date.now() - _finCache.ts < FIN_TTL) {
-    setHtml(el, _finCache.html)
+    setHtml(el, _finCache.html);
     return;
   }
 
-  // Google News RSS for TW financial keywords
-  const queries = ['台股 股市', '美股 那斯達克', '台積電 2330', '財經 投資'];
+  // 用多個關鍵字搜尋台股財經新聞
+  const queries = ['台股', '美股', '台積電', '財經'];
   const allItems = [];
 
   const jobs = queries.map(async q => {
-    const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant`;
-    try {
-      const r = await proxyFetch(rssUrl);
-      const text = await r.text();
-      const xml = new DOMParser().parseFromString(text, 'text/xml');
-      if (xml.querySelector('parsererror')) return [];
-      return Array.from(xml.getElementsByTagName('item')).slice(0, 5).map(item => ({
-        title:     item.getElementsByTagName('title')[0]?.textContent?.trim() || '',
-        link:      gnLink(item),
-        publisher: item.querySelector('source')?.textContent?.trim() || '',
-        pubDate:   item.getElementsByTagName('pubDate')[0]?.textContent?.trim() || '',
-        _ts:       new Date(item.getElementsByTagName('pubDate')[0]?.textContent || 0).getTime() || 0,
-      })).filter(n => n.title);
-    } catch (_) { return []; }
+    const items = await _yfNewsSearch(q, 5);
+    return items;
   });
 
   const res = await Promise.allSettled(jobs);
   res.forEach(r => { if (r.status === 'fulfilled') allItems.push(...r.value); });
 
   if (!allItems.length) {
-    // last resort: try Yahoo Finance TW RSS
-    try {
-      const r = await proxyFetch('https://tw.news.yahoo.com/rss/finance');
-      const text = await r.text();
-      const xml = new DOMParser().parseFromString(text, 'text/xml');
-      Array.from(xml.querySelectorAll('item')).slice(0, 5).forEach(item => {
-        allItems.push({
-          title:     item.getElementsByTagName('title')[0]?.textContent?.trim() || '',
-          link:      gnLink(item),
-          publisher: 'Yahoo Finance',
-          pubDate:   item.getElementsByTagName('pubDate')[0]?.textContent?.trim() || '',
-          _ts:       new Date(item.getElementsByTagName('pubDate')[0]?.textContent || 0).getTime() || 0,
-        });
-      });
-    } catch (_) {}
-  }
-
-  if (!allItems.length) {
-    setHtml(el, '<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 財經新聞載入失敗<br><small>請稍後重試</small></div>')
+    setHtml(el, '<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 財經新聞載入失敗<br><small>請稍後重試</small></div>');
     return;
   }
 
-  // Deduplicate by title, sort by time desc, take top 10
+  // Deduplicate by title, sort by time desc, take top 5
   const seen = new Set();
   const top = allItems
     .filter(n => { if (!n.title || seen.has(n.title)) return false; seen.add(n.title); return true; })
@@ -2602,7 +2589,7 @@ async function fetchFinanceNews() {
 
   _finCache.html = html;
   _finCache.ts   = Date.now();
-  setHtml(el, html)
+  setHtml(el, html);
 }
 
 // ==================== PORTFOLIO MODAL ====================
