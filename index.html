@@ -1547,19 +1547,74 @@ async function fetchTpexIndex() {
   return null;
 }
 
+// ==================== TAIFEX DailyMarketReportFut 共用快取 ====================
+// 端點：https://openapi.taifex.com.tw/v1/DailyMarketReportFut（不帶 query param）
+// 含當日日盤（TradingSession=一般）與夜盤（盤後）所有期貨合約資料
+// cors.lol / codetabs 均可取得；帶 ?CommodityID= 會觸發 302 → Swagger HTML
+const _txDailyCache = { ts: 0, day: null, night: null };
+const TX_DAILY_TTL  = 5 * 60 * 1000;
+let   _txDailyProm  = null;   // 去重：同時多次呼叫只發一個 request
+
+async function _fetchTxDailyData() {
+  // 1. 快取命中
+  if (_txDailyCache.day !== undefined && Date.now() - _txDailyCache.ts < TX_DAILY_TTL
+      && _txDailyCache.ts > 0) return _txDailyCache;
+
+  // 2. 若已有進行中的 Promise，等待同一個
+  if (_txDailyProm) return _txDailyProm;
+
+  _txDailyProm = (async () => {
+    try {
+      // 不帶 query param —— proxy 可正常轉發；帶參數會被 302 到 Swagger HTML
+      const r    = await proxyFetch('https://openapi.taifex.com.tw/v1/DailyMarketReportFut');
+      const rows = JSON.parse(await r.text());
+      if (!Array.isArray(rows) || !rows.length) throw new Error('empty');
+
+      const n = s => parseFloat(String(s || '0').replace(/,/g, '')) || 0;
+
+      // 篩出台指期（Contract = 'TX'），依交易時段分組，取成交量最大（近月）
+      const tx    = rows.filter(row => row.Contract === 'TX');
+      const byVol = (a, b) => n(b.Volume) - n(a.Volume);
+      const dayR  = tx.filter(row => row.TradingSession === '一般').sort(byVol)[0];
+      const ngtR  = tx.filter(row => row.TradingSession === '盤後').sort(byVol)[0];
+
+      const parse = row => {
+        if (!row) return null;
+        const price = n(row.Last);
+        const chg   = n(row.Change);
+        // '%' 欄位格式如 "1.84%" 或 "-0.10%"
+        const pct   = parseFloat((row['%'] || '0').replace('%', '')) || (price && chg ? chg / (price - chg) * 100 : 0);
+        const vol   = n(row.Volume);
+        return price > 0 ? { price, chg, pct, vol } : null;
+      };
+
+      _txDailyCache.day   = parse(dayR);
+      _txDailyCache.night = parse(ngtR);
+      _txDailyCache.ts    = Date.now();
+    } catch (_) {
+      // 保留舊快取，僅更新時間戳以避免短期內重複打
+      if (!_txDailyCache.ts) _txDailyCache.ts = Date.now() - TX_DAILY_TTL + 30000;
+    }
+    _txDailyProm = null;
+    return _txDailyCache;
+  })();
+
+  return _txDailyProm;
+}
+
 // ==================== 台指近月（TXF）====================
 const _SS_TXF = 'smtm_txf_last';
 async function fetchTxfNear() {
-  const mkQ = (p) => {
+  const mkQ = (p, shortName = '台指近月') => {
     const q = { symbol: 'TXF', regularMarketPrice: p.price,
       regularMarketChange: p.chg, regularMarketChangePercent: p.pct,
       regularMarketVolume: p.vol || 0, volChgPct: null,
-      regularMarketTime: Math.floor(Date.now() / 1000), shortName: '台指近月' };
+      regularMarketTime: Math.floor(Date.now() / 1000), shortName };
     try { sessionStorage.setItem(_SS_TXF, JSON.stringify(q)); } catch(_) {}
     return q;
   };
 
-  // ① TWSE MIS（tse_TXFR1.tw = 台指期近月連續）
+  // ① TWSE MIS（tse_TXFR1.tw）— 交易時段即時，盤後欄位為 "-"
   try {
     const url = 'https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_TXFR1.tw&json=1&delay=0';
     const r = await proxyFetch(url);
@@ -1569,11 +1624,9 @@ async function fetchTxfNear() {
       const zOk  = m.z  && m.z  !== '-';
       const pzOk = m.pz && m.pz !== '-';
       const yOk  = m.y  && m.y  !== '-';
-      // 盤中用成交價，盤後 z/pz 皆 "-" 時退回昨收（pz）顯示參考值
       const price = parseFloat(zOk ? m.z : pzOk ? m.pz : yOk ? m.y : 0);
       const prev  = parseFloat(yOk ? m.y : 0);
       if (price > 0) {
-        // 只有當天有成交才計算漲跌；純昨收參考值則顯示 0
         const chg = (zOk || pzOk) && prev > 0 ? price - prev : 0;
         const pct = (zOk || pzOk) && prev > 0 ? chg / prev * 100 : 0;
         return mkQ({ price, chg, pct, vol: parseFloat(m.v || 0) });
@@ -1581,45 +1634,13 @@ async function fetchTxfNear() {
     }
   } catch (_) {}
 
-  // ② TAIFEX OpenAPI DailyFuturesQuotes（GET → proxy 可用）
+  // ② TAIFEX OpenAPI DailyMarketReportFut（日盤近月，最後交易日收盤參考）
   try {
-    const r = await proxyFetch('https://openapi.taifex.com.tw/v1/DailyFuturesQuotes?CommodityID=TXF');
-    const rows = JSON.parse(await r.text());
-    if (Array.isArray(rows) && rows.length) {
-      // 近月 = 成交量最大的合約
-      const best = rows.reduce((a, b) =>
-        (parseFutPrice(b)?.vol || 0) > (parseFutPrice(a)?.vol || 0) ? b : a);
-      const parsed = parseFutPrice(best);
-      if (parsed?.price > 0) return mkQ(parsed);
-    }
+    const cache = await _fetchTxDailyData();
+    if (cache.day?.price > 0) return mkQ(cache.day, '台指近月（參考）');
   } catch (_) {}
 
-  // ③ TAIFEX MIS POST MarketCode=0（日盤，瀏覽器可能因 CORS 失敗）
-  try {
-    const r = await fetch('https://mis.taifex.com.tw/futures/api/getQuoteList', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ MarketCode: '0', CommodityID: 'TXF', RowCount: 10, PageNo: 1 }),
-      signal: AbortSignal.timeout(6000),
-    });
-    if (r.ok) {
-      const d = JSON.parse(await r.text());
-      const list = ((d.RtData || d.RtnData || d.Data || {}).QuoteList || []);
-      const item = list.find(i => (i.SymbolID||'').startsWith('TXF') && (i.SymbolID||'').includes('-F'))
-                || list.find(i => (i.SymbolID||'').startsWith('TXF'));
-      if (item) {
-        const parsed = parseFutPrice({
-          ClosingPrice: item.CLastPrice || item.SettlementPrice,
-          ReferencePrice: item.CRefPrice,
-          Change: item.CDiff,
-          Volume: item.CTotalVolume,
-        });
-        if (parsed?.price > 0) return mkQ(parsed);
-      }
-    }
-  } catch (_) {}
-
-  // ④ 上次已知值（session storage）
+  // ③ 上次已知值（session storage）
   try {
     const saved = JSON.parse(sessionStorage.getItem(_SS_TXF) || 'null');
     if (saved?.regularMarketPrice) return saved;
@@ -1631,28 +1652,22 @@ async function fetchTxfNear() {
 // ==================== 台指夜盤（TXF Night）====================
 const _SS_TXFN = 'smtm_txfn_last';
 async function fetchTxfNight() {
-  const mkQ = (p) => {
+  const mkQ = (p, shortName = '台指夜盤') => {
     const q = { symbol: 'TXFN', regularMarketPrice: p.price,
       regularMarketChange: p.chg, regularMarketChangePercent: p.pct,
       regularMarketVolume: p.vol || 0, volChgPct: null,
-      regularMarketTime: Math.floor(Date.now() / 1000), shortName: '台指夜盤' };
+      regularMarketTime: Math.floor(Date.now() / 1000), shortName };
     try { sessionStorage.setItem(_SS_TXFN, JSON.stringify(q)); } catch(_) {}
     return q;
   };
 
-  // ① TAIFEX OpenAPI NightFuturesQuotes（GET → proxy 可用）
+  // ① TAIFEX OpenAPI DailyMarketReportFut（盤後近月，最後夜盤收盤參考）
   try {
-    const r = await proxyFetch('https://openapi.taifex.com.tw/v1/NightFuturesQuotes?CommodityID=TXF');
-    const rows = JSON.parse(await r.text());
-    if (Array.isArray(rows) && rows.length) {
-      const best = rows.reduce((a, b) =>
-        (parseFutPrice(b)?.vol || 0) > (parseFutPrice(a)?.vol || 0) ? b : a);
-      const parsed = parseFutPrice(best);
-      if (parsed?.price > 0) return mkQ(parsed);
-    }
+    const cache = await _fetchTxDailyData();
+    if (cache.night?.price > 0) return mkQ(cache.night, '台指夜盤（參考）');
   } catch (_) {}
 
-  // ② TAIFEX MIS POST MarketCode=1（夜盤，瀏覽器可能因 CORS 失敗）
+  // ② TAIFEX MIS POST MarketCode=1（夜盤進行中可能成功，但 CORS 通常封鎖）
   try {
     const r = await fetch('https://mis.taifex.com.tw/futures/api/getQuoteList', {
       method: 'POST',
@@ -1672,7 +1687,7 @@ async function fetchTxfNight() {
           Change: item.CDiff,
           Volume: item.CTotalVolume,
         });
-        if (parsed?.price > 0) return mkQ(parsed);
+        if (parsed?.price > 0) return mkQ(parsed, '台指夜盤');
       }
     }
   } catch (_) {}
@@ -1683,7 +1698,7 @@ async function fetchTxfNight() {
     if (saved?.regularMarketPrice) return saved;
   } catch (_) {}
 
-  return null;  // 夜盤休市或無法取得時返回 null，顯示 "--"
+  return null;
 }
 
 // ==================== MARKET INDICES ====================
