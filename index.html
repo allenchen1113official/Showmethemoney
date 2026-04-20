@@ -952,6 +952,10 @@ const APIS = {
   yf_search:   { name:'新聞搜尋（Yahoo Finance Search）',
                  pri: 'https://query1.finance.yahoo.com/v1/finance/search?q=',
                  bak: 'https://query2.finance.yahoo.com/v1/finance/search?q=' },
+  // ── 新聞 RSS ──────────────────────────────────────────────────
+  udn_fin:     { name:'財經新聞（UDN 經濟日報 RSS）',
+                 pri: 'https://money.udn.com/rssfeed/news/1001/5591?ch=money',
+                 bak: 'https://money.udn.com/rssfeed/news/1001/10846?ch=money' },
   // ── 自選股 ────────────────────────────────────────────────
   stock_list:  { name:'上市股票清單（TWSE STOCK_DAY_ALL）',
                  pri: 'https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL?response=json',
@@ -2381,7 +2385,7 @@ async function fetchPortNews() {
     return;
   }
 
-  // ① 網頁載入：立即先顯示資料庫快取，不讓使用者看到「載入中」
+  // ① 網頁載入：立即先顯示資料庫快取
   let hasCached = false;
   try {
     const stored = JSON.parse(localStorage.getItem('smtm_port_news_db') || 'null');
@@ -2397,77 +2401,85 @@ async function fetchPortNews() {
     setHtml(el, '<div class="loading"><i class="fa-solid fa-circle-notch"></i> 載入中...</div>');
   }
 
-  // ② 取中文名稱（最多等 5s，不讓名稱查詢阻塞新聞載入）
+  // ② 取中文名稱（限 5s，不阻塞主流程）
   await Promise.race([
     fetchTwseNames(valid).catch(() => {}),
     new Promise(r => setTimeout(r, 5000))
   ]);
 
-  // ③ 各接口抓新聞：每支股票以「代號.TW」查詢，3 筆 × 10 支並行
-  const _fetchAll = async (baseUrl) => {
-    const jobs = valid.slice(0, 10).map(async stock => {
-      const cnName = _twseNameCache[stock] || '';
-      const params = `${encodeURIComponent(stock + '.TW')}&lang=zh-TW&region=TW&quotesCount=0&newsCount=3&enableFuzzyQuery=false`;
-      try {
-        const r = await proxyFetch(baseUrl + params);
-        const d = JSON.parse(await r.text());
-        return (d.news || [])
-          .map(n => ({
-            title:     n.title || '',
-            link:      n.link  || '',
-            publisher: n.publisher || '',
-            _ts:       (n.providerPublishTime || 0) * 1000,
-            _ticker:   stock,
-            _name:     cnName || stock,
-          }))
-          .filter(n => n.title && n.link);
-      } catch (_) { return []; }
-    });
-    const res = await Promise.allSettled(jobs);
-    const all = [];
-    res.forEach(r => { if (r.status === 'fulfilled') all.push(...r.value); });
-    return all;
-  };
+  const stocks10 = valid.slice(0, 10);
 
-  const withTout = (p, ms = 12000) =>
-    Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
-
+  // ③ 主接口：UDN RSS + 關鍵字過濾（股票代號或中文名稱出現在標題中）
   let allItems = [];
+  const rssResults = await Promise.allSettled([
+    _fetchRssFeed(APIS.udn_fin.pri),
+    _fetchRssFeed(APIS.udn_fin.bak),
+  ]);
+  const rssPool = [];
+  rssResults.forEach(r => { if (r.status === 'fulfilled') rssPool.push(...r.value); });
 
-  // 主接口（query1）
-  try {
-    allItems = await withTout(_fetchAll(APIS.yf_search.pri));
-    console.info('[PortNews] 主接口取得', allItems.length, '筆');
-  } catch (e) {
-    console.warn('[PortNews] 主接口失敗:', e.message);
+  for (const item of rssPool) {
+    const hay = (item.title + ' ' + item.description).toLowerCase();
+    for (const stock of stocks10) {
+      const cn = (_twseNameCache[stock] || '').toLowerCase();
+      if (hay.includes(stock.toLowerCase()) || (cn && hay.includes(cn))) {
+        allItems.push({ ...item, _ticker: stock, _name: _twseNameCache[stock] || stock, _ts: item.ts });
+        break;
+      }
+    }
   }
+  console.info('[PortNews] RSS 篩出', allItems.length, '筆');
 
-  // 備援接口（query2），僅主接口無資料時才呼叫
-  if (!allItems.length && APIS.yf_search.bak) {
+  // ④ 備援接口：Yahoo Finance Search（RSS 結果不足 3 筆時啟用）
+  if (allItems.length < 3) {
+    const withTout = (p, ms = 12000) =>
+      Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+    const _fetchAllYF = async (baseUrl) => {
+      const jobs = stocks10.map(async stock => {
+        const cnName = _twseNameCache[stock] || '';
+        const params = `${encodeURIComponent(stock + '.TW')}&lang=zh-TW&region=TW&quotesCount=0&newsCount=3&enableFuzzyQuery=false`;
+        try {
+          const r = await proxyFetch(baseUrl + params);
+          const d = JSON.parse(await r.text());
+          return (d.news || [])
+            .map(n => ({ title: n.title||'', link: n.link||'', publisher: n.publisher||'',
+                          ts: (n.providerPublishTime||0)*1000, _ts: (n.providerPublishTime||0)*1000,
+                          _ticker: stock, _name: cnName||stock }))
+            .filter(n => n.title && n.link);
+        } catch (_) { return []; }
+      });
+      const res = await Promise.allSettled(jobs);
+      const all = [];
+      res.forEach(r => { if (r.status === 'fulfilled') all.push(...r.value); });
+      return all;
+    };
     try {
-      allItems = await withTout(_fetchAll(APIS.yf_search.bak));
-      console.info('[PortNews] 備援接口取得', allItems.length, '筆');
-    } catch (e) {
-      console.warn('[PortNews] 備援接口失敗:', e.message);
+      const yfItems = await withTout(_fetchAllYF(APIS.yf_search.pri));
+      if (yfItems.length) { allItems.push(...yfItems); console.info('[PortNews] YF 主接口補充', yfItems.length, '筆'); }
+    } catch (_) {}
+    if (allItems.length < 3 && APIS.yf_search.bak) {
+      try {
+        const yfItems2 = await withTout(_fetchAllYF(APIS.yf_search.bak));
+        if (yfItems2.length) { allItems.push(...yfItems2); console.info('[PortNews] YF 備援接口補充', yfItems2.length, '筆'); }
+      } catch (_) {}
     }
   }
 
-  // ④ 去重、排序、取 top 10
+  // ⑤ 去重、排序、取 top 10
   const seen = new Set();
   const top = allItems
     .filter(n => { if (!n.title || seen.has(n.title)) return false; seen.add(n.title); return true; })
-    .sort((a, b) => b._ts - a._ts)
+    .sort((a, b) => (b.ts || b._ts || 0) - (a.ts || a._ts || 0))
     .slice(0, 10);
 
   if (!top.length) {
-    // 主備援皆無資料：保留已顯示的快取；無快取才顯示錯誤
     if (!hasCached) {
       setHtml(el, `<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 暫無相關新聞<br><small style="color:var(--text3)">請確認自選股已設定</small></div>`);
     }
     return;
   }
 
-  // ⑤ 渲染並存入資料庫
+  // ⑥ 渲染並存入資料庫
   const html = top.map(n => `
     <div class="pn-item">
       <a href="${n.link}" target="_blank" rel="noopener">
@@ -2476,7 +2488,7 @@ async function fetchPortNews() {
       <div class="pn-meta">
         <span class="tag tag-ticker">${esc(n._ticker)}${n._name && n._name !== n._ticker ? ' ' + esc(n._name) : ''}</span>
         ${n.publisher ? `<span class="ntime">${esc(n.publisher)}</span>` : ''}
-        <span class="ntime">${n._ts ? ago(n._ts) : ''}</span>
+        <span class="ntime">${(n.ts||n._ts) ? ago(n.ts||n._ts) : ''}</span>
       </div>
     </div>`).join('');
 
@@ -2781,8 +2793,53 @@ async function fetchPTT() {
   }
 }
 
-// ==================== FINANCE NEWS (Yahoo Finance search) ====================
-// Google News RSS 被 proxy 封鎖；改用 Yahoo Finance /v1/finance/search（JSON）
+// ==================== RSS HELPER ====================
+// 用 allorigins GET（JSON wrapper）取 RSS，再 regex 解析；
+// allorigins/get 回傳 JSON 物件，不觸發 isGood HTML 過濾
+function _parseRssItems(xmlText) {
+  const items = [];
+  const re = /<item[\s>]([\s\S]*?)<\/item>/g;
+  let m;
+  while ((m = re.exec(xmlText)) !== null) {
+    const blk   = m[1];
+    const title = (blk.match(/<title><!\[CDATA\[([\s\S]*?)\]\]>/) ||
+                   blk.match(/<title>([\s\S]*?)<\/title>/))?.[1]?.trim() || '';
+    const link  = (blk.match(/<link>([\s\S]*?)<\/link>/) ||
+                   blk.match(/<guid[^>]*>([\s\S]*?)<\/guid>/))?.[1]?.trim() || '';
+    const pub   = blk.match(/<pubDate>([\s\S]*?)<\/pubDate>/)?.[1]?.trim() || '';
+    const desc  = (blk.match(/<description><!\[CDATA\[([\s\S]*?)\]\]>/) ||
+                   blk.match(/<description>([\s\S]*?)<\/description>/))?.[1]?.trim() || '';
+    if (title && link) items.push({ title, link, ts: pub ? new Date(pub).getTime() : 0, description: desc });
+  }
+  return items;
+}
+
+async function _fetchRssFeed(url) {
+  // ① allorigins GET JSON wrapper（繞過 isGood HTML 過濾）
+  try {
+    const r = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
+      { signal: AbortSignal.timeout(10000) });
+    if (r.ok) {
+      const d = await r.json();
+      if (d.contents?.includes('<item>')) return _parseRssItems(d.contents);
+    }
+  } catch (_) {}
+  // ② proxyFetch（RSS 是 XML，不含 <!DOCTYPE html，可通過 isGood）
+  try {
+    const r = await proxyFetch(url);
+    const t = await r.text();
+    if (t.includes('<item>')) return _parseRssItems(t);
+  } catch (_) {}
+  // ③ 直連（CORS 可能阻擋，視瀏覽器）
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const t = await r.text();
+    if (t.includes('<item>')) return _parseRssItems(t);
+  } catch (_) {}
+  return [];
+}
+
+// ==================== FINANCE NEWS (UDN RSS 主；Yahoo Finance 備援) ====================
 const _finCache = { ts: 0, html: '' };
 const FIN_TTL   = 5 * 60 * 1000;
 
@@ -2794,46 +2851,52 @@ async function fetchFinanceNews() {
     return;
   }
 
-  // 用多個關鍵字搜尋台股財經新聞
-  const queries = ['台股', '美股', '台積電', '財經'];
-  const allItems = [];
+  // ① 立即先顯示 localStorage 快取
+  let hasCached = false;
+  try {
+    const stored = JSON.parse(localStorage.getItem('smtm_fin_news_db') || 'null');
+    if (stored?.html) {
+      setHtml(el, stored.html +
+        '<p style="font-size:.65rem;color:var(--text3);text-align:center;margin-top:.4rem">（資料庫快取 · ' + fmtTs(stored.ts) + '）</p>');
+      hasCached = true;
+    }
+  } catch (_) {}
 
-  const jobs = queries.map(async q => {
-    const items = await _yfNewsSearch(q, 5);
-    return items;
-  });
+  // ② 主接口：UDN 財經 RSS
+  let allItems = await _fetchRssFeed(APIS.udn_fin.pri);
 
-  const res = await Promise.allSettled(jobs);
-  res.forEach(r => { if (r.status === 'fulfilled') allItems.push(...r.value); });
+  // ③ 備援接口：UDN 科技 RSS（主接口不足 5 筆時補充）
+  if (allItems.length < 5) {
+    const bak = await _fetchRssFeed(APIS.udn_fin.bak);
+    allItems.push(...bak);
+  }
+
+  // ④ 最終備援：Yahoo Finance Search（兩個 RSS 都失敗時）
+  if (!allItems.length) {
+    const queries = ['台股', '台積電', '財經'];
+    const res = await Promise.allSettled(queries.map(q => _yfNewsSearch(q, 5)));
+    res.forEach(r => {
+      if (r.status === 'fulfilled') allItems.push(...r.value.map(n => ({ ...n, ts: n._ts || 0 })));
+    });
+  }
 
   if (!allItems.length) {
-    // 載入失敗：優先展示記憶體快取，其次 localStorage 資料庫，最後顯示錯誤
-    if (_finCache.html) {
-      setHtml(el, _finCache.html +
-        '<p style="font-size:.65rem;color:var(--text3);text-align:center;margin-top:.4rem">（快取資料）</p>');
-    } else {
-      try {
-        const stored = JSON.parse(localStorage.getItem('smtm_fin_news_db') || 'null');
-        if (stored?.html) {
-          setHtml(el, stored.html +
-            '<p style="font-size:.65rem;color:var(--text3);text-align:center;margin-top:.4rem">（資料庫快取 · ' + fmtTs(stored.ts) + '）</p>');
-          return;
-        }
-      } catch (_) {}
+    if (!hasCached) {
       setHtml(el, '<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 財經新聞載入失敗<br><small>請稍後重試</small></div>');
     }
     return;
   }
 
-  // Deduplicate by title, sort by time desc, take top 5
   const seen = new Set();
   const top = allItems
     .filter(n => { if (!n.title || seen.has(n.title)) return false; seen.add(n.title); return true; })
-    .sort((a, b) => b._ts - a._ts)
+    .sort((a, b) => (b.ts || 0) - (a.ts || 0))
     .slice(0, 5);
 
   const html = top.map((n, i) => {
     const rankCls = i === 0 ? 'gold' : i === 1 ? 'silver' : i === 2 ? 'bronze' : '';
+    const pub = n.publisher || '經濟日報';
+    const ts  = n.ts || 0;
     return `
       <div class="news-item">
         <div style="display:flex;align-items:flex-start;gap:.4rem">
@@ -2843,15 +2906,14 @@ async function fetchFinanceNews() {
           </a>
         </div>
         <div class="news-meta" style="padding-left:1.7rem">
-          ${n.publisher ? `<span class="tag tag-src">${esc(n.publisher)}</span>` : ''}
-          <span class="ntime">${n._ts ? ago(n._ts) : ''}</span>
+          <span class="tag tag-src">${esc(pub)}</span>
+          <span class="ntime">${ts ? ago(ts) : ''}</span>
         </div>
       </div>`;
   }).join('');
 
   _finCache.html = html;
   _finCache.ts   = Date.now();
-  // 成功取得時同步存入 localStorage 資料庫（供失敗時回退使用）
   try { localStorage.setItem('smtm_fin_news_db', JSON.stringify({ html, ts: Date.now() })); } catch (_) {}
   setHtml(el, html);
 }
