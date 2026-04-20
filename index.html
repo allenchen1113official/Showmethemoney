@@ -2375,53 +2375,99 @@ async function _yfNewsSearch(query, count = 5) {
 async function fetchPortNews() {
   const el = id('portNews');
   const valid = portfolio.filter(Boolean);
+
   if (!valid.length) {
     setHtml(el, '<p style="text-align:center;color:var(--text3);font-size:.78rem;padding:1rem">請先設定自選股</p>');
     return;
   }
-  setHtml(el, '<div class="loading"><i class="fa-solid fa-circle-notch"></i> 載入中...</div>');
 
-  // 確保中文名稱已填（若從 refreshAll 呼叫則已由 fetchPortfolio 完成）
-  await fetchTwseNames(valid);
+  // ① 網頁載入：立即先顯示資料庫快取，不讓使用者看到「載入中」
+  let hasCached = false;
+  try {
+    const stored = JSON.parse(localStorage.getItem('smtm_port_news_db') || 'null');
+    if (stored?.html) {
+      setHtml(el, stored.html +
+        '<p style="font-size:.65rem;color:var(--text3);text-align:center;margin-top:.4rem">（資料庫快取 · ' + fmtTs(stored.ts) + '）</p>');
+      if (id('pnTs')) id('pnTs').textContent = fmtTs(stored.ts);
+      hasCached = true;
+    }
+  } catch (_) {}
 
-  const allItems = [];
-  const seen = new Set();
+  if (!hasCached) {
+    setHtml(el, '<div class="loading"><i class="fa-solid fa-circle-notch"></i> 載入中...</div>');
+  }
 
-  // 每支股票：優先用「台股代號.TW」搜尋（Yahoo Finance 直接對應到股票新聞）；
-  // 同時以中文名稱補充（代號 + 中文名並行）
-  const jobs = valid.slice(0, 10).flatMap(stock => {
-    const cnName = _twseNameCache[stock] || '';
-    const queries = [`${stock}.TW`];
-    if (cnName) queries.push(cnName);
-    return queries.map(async q => {
-      const items = await _yfNewsSearch(q, 5);
-      return items.map(n => ({ ...n, _ticker: stock, _name: cnName || stock }));
+  // ② 取中文名稱（最多等 5s，不讓名稱查詢阻塞新聞載入）
+  await Promise.race([
+    fetchTwseNames(valid).catch(() => {}),
+    new Promise(r => setTimeout(r, 5000))
+  ]);
+
+  // ③ 各接口抓新聞：每支股票以「代號.TW」查詢，3 筆 × 10 支並行
+  const _fetchAll = async (baseUrl) => {
+    const jobs = valid.slice(0, 10).map(async stock => {
+      const cnName = _twseNameCache[stock] || '';
+      const params = `${encodeURIComponent(stock + '.TW')}&lang=zh-TW&region=TW&quotesCount=0&newsCount=3&enableFuzzyQuery=false`;
+      try {
+        const r = await proxyFetch(baseUrl + params);
+        const d = JSON.parse(await r.text());
+        return (d.news || [])
+          .map(n => ({
+            title:     n.title || '',
+            link:      n.link  || '',
+            publisher: n.publisher || '',
+            _ts:       (n.providerPublishTime || 0) * 1000,
+            _ticker:   stock,
+            _name:     cnName || stock,
+          }))
+          .filter(n => n.title && n.link);
+      } catch (_) { return []; }
     });
-  });
+    const res = await Promise.allSettled(jobs);
+    const all = [];
+    res.forEach(r => { if (r.status === 'fulfilled') all.push(...r.value); });
+    return all;
+  };
 
-  const res = await Promise.allSettled(jobs);
-  res.forEach(r => { if (r.status === 'fulfilled') allItems.push(...r.value); });
+  const withTout = (p, ms = 12000) =>
+    Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
 
+  let allItems = [];
+
+  // 主接口（query1）
+  try {
+    allItems = await withTout(_fetchAll(APIS.yf_search.pri));
+    console.info('[PortNews] 主接口取得', allItems.length, '筆');
+  } catch (e) {
+    console.warn('[PortNews] 主接口失敗:', e.message);
+  }
+
+  // 備援接口（query2），僅主接口無資料時才呼叫
+  if (!allItems.length && APIS.yf_search.bak) {
+    try {
+      allItems = await withTout(_fetchAll(APIS.yf_search.bak));
+      console.info('[PortNews] 備援接口取得', allItems.length, '筆');
+    } catch (e) {
+      console.warn('[PortNews] 備援接口失敗:', e.message);
+    }
+  }
+
+  // ④ 去重、排序、取 top 10
+  const seen = new Set();
   const top = allItems
     .filter(n => { if (!n.title || seen.has(n.title)) return false; seen.add(n.title); return true; })
     .sort((a, b) => b._ts - a._ts)
     .slice(0, 10);
 
   if (!top.length) {
-    // 讀取失敗：優先從 localStorage 資料庫顯示快取
-    try {
-      const stored = JSON.parse(localStorage.getItem('smtm_port_news_db') || 'null');
-      if (stored?.html) {
-        setHtml(el, stored.html +
-          '<p style="font-size:.65rem;color:var(--text3);text-align:center;margin-top:.4rem">（資料庫快取 · ' + fmtTs(stored.ts) + '）</p>');
-        if (id('pnTs')) id('pnTs').textContent = fmtTs(stored.ts);
-        return;
-      }
-    } catch (_) {}
-    setHtml(el, `<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 暫無相關新聞<br><small style="color:var(--text3)">請確認自選股已設定</small></div>`);
+    // 主備援皆無資料：保留已顯示的快取；無快取才顯示錯誤
+    if (!hasCached) {
+      setHtml(el, `<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 暫無相關新聞<br><small style="color:var(--text3)">請確認自選股已設定</small></div>`);
+    }
     return;
   }
 
+  // ⑤ 渲染並存入資料庫
   const html = top.map(n => `
     <div class="pn-item">
       <a href="${n.link}" target="_blank" rel="noopener">
@@ -2434,7 +2480,6 @@ async function fetchPortNews() {
       </div>
     </div>`).join('');
 
-  // 成功時存入 localStorage 資料庫
   try { localStorage.setItem('smtm_port_news_db', JSON.stringify({ html, ts: Date.now() })); } catch (_) {}
   setHtml(el, html);
   if (id('pnTs')) id('pnTs').textContent = fmtTs(Date.now());
