@@ -925,6 +925,72 @@ const CFG = {
   refreshMs: 60000,
 };
 
+// ==================== API 介接接口資料表 ====================
+// 每個介接分「主介接（pri）」與「備援（bak）」
+// 主介接失敗時自動切換備援；bak:null 表示目前無可用備援
+const APIS = {
+  // ── 台灣指數 ──────────────────────────────────────────────
+  taiex:       { name:'台灣加權指數（TWSE MIS）',
+                 pri: 'https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_t00.tw&json=1&delay=0',
+                 bak: 'https://query1.finance.yahoo.com/v8/finance/chart/%5ETWII?interval=1d&range=2d' },
+  tpex_mis:    { name:'櫃買指數即時（TWSE MIS OTC）',
+                 pri: 'https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=otc_OTC01.tw&json=1&delay=0',
+                 bak: 'https://info.tpex.org.tw/api/mktRT' },
+  tpex_home:   { name:'櫃買指數盤後（TPEx mktRT）',
+                 pri: 'https://info.tpex.org.tw/api/mktRT',
+                 bak: null },
+  txf_mis:     { name:'台指近月即時（TWSE MIS TXFR1）',
+                 pri: 'https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_TXFR1.tw&json=1&delay=0',
+                 bak: 'https://openapi.taifex.com.tw/v1/DailyMarketReportFut' },
+  txf_daily:   { name:'台指期日報（TAIFEX OpenAPI）',
+                 pri: 'https://openapi.taifex.com.tw/v1/DailyMarketReportFut',
+                 bak: null },
+  // ── 國際指數 ──────────────────────────────────────────────
+  yf_chart:    { name:'國際指數圖表（Yahoo Finance Chart）',
+                 pri: 'https://query1.finance.yahoo.com/v8/finance/chart/',
+                 bak: 'https://query2.finance.yahoo.com/v8/finance/chart/' },
+  yf_search:   { name:'新聞搜尋（Yahoo Finance Search）',
+                 pri: 'https://query1.finance.yahoo.com/v1/finance/search?q=',
+                 bak: 'https://query2.finance.yahoo.com/v1/finance/search?q=' },
+  // ── 自選股 ────────────────────────────────────────────────
+  stock_list:  { name:'上市股票清單（TWSE STOCK_DAY_ALL）',
+                 pri: 'https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL?response=json',
+                 bak: 'https://openapi.twse.com.tw/v1/opendata/t187ap03_L' },
+  stock_day:   { name:'上市單股歷史（TWSE STOCK_DAY）',
+                 pri: 'https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY',
+                 bak: 'https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY' },
+  tpex_board:  { name:'上櫃股票清單（TPEx mainboard）',
+                 pri: 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes',
+                 bak: 'https://openapi.twse.com.tw/v1/opendata/t187ap05_L' },
+  mis_rt:      { name:'即時報價（TWSE MIS getStockInfo）',
+                 pri: 'https://mis.twse.com.tw/stock/api/getStockInfo.jsp',
+                 bak: null },
+  // ── 其他 ──────────────────────────────────────────────────
+  bfi82u:      { name:'三大法人買賣超（TWSE BFI82U）',
+                 pri: 'https://www.twse.com.tw/rwd/zh/fund/BFI82U?type=day&response=json',
+                 bak: null },
+  ptt:         { name:'PTT Stock 板文章列表',
+                 pri: 'https://www.ptt.cc/bbs/Stock/index.html',
+                 bak: null },
+};
+
+// 備援輔助：proxyFetch 主介接，失敗時自動切換備援
+async function apiFetch(priUrl, bakUrl = null) {
+  try { return await proxyFetch(priUrl); } catch (_) {}
+  if (bakUrl) return await proxyFetch(bakUrl);
+  throw new Error('apiFetch: all endpoints failed');
+}
+// 備援輔助：CORS 直連主介接，失敗時走 proxy 備援
+async function apiCors(priUrl, bakUrl = null, timeout = 8000) {
+  try {
+    const r = await fetch(priUrl, { signal: AbortSignal.timeout(timeout) });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r;
+  } catch (_) {}
+  if (bakUrl) return await proxyFetch(bakUrl);
+  throw new Error('apiCors: all endpoints failed');
+}
+
 const TL_MAP = {
   red:       { label:'紅燈',   desc:'景氣過熱', color:'#ff4444', bg:'rgba(255,68,68,.18)',  icon:'🔴' },
   yellowRed: { label:'黃紅燈', desc:'景氣偏熱', color:'#ff8c00', bg:'rgba(255,140,0,.18)', icon:'🟠' },
@@ -1340,31 +1406,31 @@ async function yfQuotes(symbols) {
 
 // 指數 / 期貨專用：使用 meta 內建的 change/percent（最準確），不自行計算
 async function yfQuoteIndex(symbol) {
-  const url = CFG.yfChart + encodeURIComponent(symbol) + '?interval=1d&range=2d';
-  try {
-    const r = await proxyFetch(url);
-    const d = JSON.parse(await r.text());
-    const result = d.chart?.result?.[0];
-    const meta   = result?.meta;
-    if (!meta || !meta.regularMarketPrice) return null;
-    const price = meta.regularMarketPrice;
-    // 優先使用 Yahoo 內建計算值，避免跨日 prev 不準
-    const chg   = meta.regularMarketChange       ?? (price - (meta.chartPreviousClose || meta.regularMarketPreviousClose || price));
-    const pct   = meta.regularMarketChangePercent ?? (meta.chartPreviousClose ? chg / meta.chartPreviousClose * 100 : 0);
-    return {
-      symbol,
-      regularMarketPrice: price,
-      regularMarketChange: chg,
-      regularMarketChangePercent: pct,
-      regularMarketVolume: meta.regularMarketVolume || 0,
-      volChgPct: null,
-      regularMarketTime: meta.regularMarketTime || 0,
-      shortName: meta.shortName || meta.longName || symbol,
-    };
-  } catch (e) {
-    console.warn('[YF-IDX]', symbol, e.message);
-    return null;
+  // 主介接 query1；備援自動切 query2（APIS.yf_chart）
+  const suffix = encodeURIComponent(symbol) + '?interval=1d&range=2d';
+  for (const base of [APIS.yf_chart.pri, APIS.yf_chart.bak].filter(Boolean)) {
+    try {
+      const r = await proxyFetch(base + suffix);
+      const d = JSON.parse(await r.text());
+      const result = d.chart?.result?.[0];
+      const meta   = result?.meta;
+      if (!meta || !meta.regularMarketPrice) continue;
+      const price = meta.regularMarketPrice;
+      const chg   = meta.regularMarketChange       ?? (price - (meta.chartPreviousClose || meta.regularMarketPreviousClose || price));
+      const pct   = meta.regularMarketChangePercent ?? (meta.chartPreviousClose ? chg / meta.chartPreviousClose * 100 : 0);
+      return {
+        symbol,
+        regularMarketPrice: price,
+        regularMarketChange: chg,
+        regularMarketChangePercent: pct,
+        regularMarketVolume: meta.regularMarketVolume || 0,
+        volChgPct: null,
+        regularMarketTime: meta.regularMarketTime || 0,
+        shortName: meta.shortName || meta.longName || symbol,
+      };
+    } catch (e) { console.warn('[YF-IDX]', symbol, base, e.message); }
   }
+  return null;
 }
 
 // 輔助：解析台指期各來源欄位
@@ -2076,13 +2142,10 @@ let _twseListLoaded = false;
 async function loadTwseList() {
   if (_twseListLoaded) return;
 
-  // ① 優先：www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL（有 CORS，直接取）
+  // ① 優先：APIS.stock_list.pri（CORS 直連，無需 proxy）
   //    回傳格式：{ stat, fields:[證券代號,證券名稱,...], data:[["0050","元大台灣50",...]] }
   try {
-    const r = await fetch(
-      'https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL?response=json',
-      { signal: AbortSignal.timeout(8000) }
-    );
+    const r = await fetch(APIS.stock_list.pri, { signal: AbortSignal.timeout(8000) });
     const d = JSON.parse(await r.text());
     const rows = d.data || [];
     if (Array.isArray(rows) && rows.length) {
@@ -2291,22 +2354,22 @@ async function fetchPortfolio() {
 // Google News RSS 已被各 proxy 封鎖（回傳 Google "Sorry..." HTML）
 // 改用 Yahoo Finance /v1/finance/search，回傳 JSON，proxy 可正常傳遞
 async function _yfNewsSearch(query, count = 5) {
-  // 直接 CORS fetch 優先，不成功再走 proxy
-  const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(query)}&lang=zh-TW&region=TW&quotesCount=0&newsCount=${count}&enableFuzzyQuery=false`;
-  let text;
-  try {
-    const r = await proxyFetch(url);
-    text = await r.text();
-  } catch (_) { return []; }
-  try {
-    const d = JSON.parse(text);
-    return (d.news || []).map(n => ({
-      title:     n.title || '',
-      link:      n.link  || '',
-      publisher: n.publisher || '',
-      _ts:       (n.providerPublishTime || 0) * 1000,
-    })).filter(n => n.title && n.link);
-  } catch (_) { return []; }
+  // 主介接 query1；備援自動切 query2（APIS.yf_search）
+  const params = `${encodeURIComponent(query)}&lang=zh-TW&region=TW&quotesCount=0&newsCount=${count}&enableFuzzyQuery=false`;
+  for (const base of [APIS.yf_search.pri, APIS.yf_search.bak].filter(Boolean)) {
+    try {
+      const r = await proxyFetch(base + params);
+      const d = JSON.parse(await r.text());
+      const items = (d.news || []).map(n => ({
+        title:     n.title || '',
+        link:      n.link  || '',
+        publisher: n.publisher || '',
+        _ts:       (n.providerPublishTime || 0) * 1000,
+      })).filter(n => n.title && n.link);
+      if (items.length) return items;
+    } catch (_) {}
+  }
+  return [];
 }
 
 async function fetchPortNews() {
@@ -2647,11 +2710,19 @@ async function fetchFinanceNews() {
   res.forEach(r => { if (r.status === 'fulfilled') allItems.push(...r.value); });
 
   if (!allItems.length) {
-    // 載入失敗：優先展示上次快取，避免版面空白
+    // 載入失敗：優先展示記憶體快取，其次 localStorage 資料庫，最後顯示錯誤
     if (_finCache.html) {
       setHtml(el, _finCache.html +
         '<p style="font-size:.65rem;color:var(--text3);text-align:center;margin-top:.4rem">（快取資料）</p>');
     } else {
+      try {
+        const stored = JSON.parse(localStorage.getItem('smtm_fin_news_db') || 'null');
+        if (stored?.html) {
+          setHtml(el, stored.html +
+            '<p style="font-size:.65rem;color:var(--text3);text-align:center;margin-top:.4rem">（資料庫快取 · ' + fmtTs(stored.ts) + '）</p>');
+          return;
+        }
+      } catch (_) {}
       setHtml(el, '<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 財經新聞載入失敗<br><small>請稍後重試</small></div>');
     }
     return;
@@ -2683,6 +2754,8 @@ async function fetchFinanceNews() {
 
   _finCache.html = html;
   _finCache.ts   = Date.now();
+  // 成功取得時同步存入 localStorage 資料庫（供失敗時回退使用）
+  try { localStorage.setItem('smtm_fin_news_db', JSON.stringify({ html, ts: Date.now() })); } catch (_) {}
   setHtml(el, html);
 }
 
