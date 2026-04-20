@@ -956,6 +956,9 @@ const APIS = {
   udn_fin:     { name:'財經新聞（UDN 經濟日報 RSS）',
                  pri: 'https://money.udn.com/rssfeed/news/1001/5591?ch=money',
                  bak: 'https://money.udn.com/rssfeed/news/1001/10846?ch=money' },
+  gnews:       { name:'Google 新聞搜尋 RSS',
+                 pri: 'https://news.google.com/rss/search?hl=zh-TW&gl=TW&ceid=TW%3Azh-Hant&q=',
+                 bak: 'https://news.google.com/rss/search?hl=zh-Hant-TW&gl=TW&ceid=TW%3Azh-Hant&q=' },
   // ── 自選股 ────────────────────────────────────────────────
   stock_list:  { name:'上市股票清單（TWSE STOCK_DAY_ALL）',
                  pri: 'https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL?response=json',
@@ -2376,6 +2379,22 @@ async function _yfNewsSearch(query, count = 5) {
   return [];
 }
 
+// Google News 搜尋 helper：回傳 RSS items（標題已剝離 " - 來源" 後綴）
+async function _fetchGNews(query, count = 5, useBak = false) {
+  const base = useBak ? APIS.gnews.bak : APIS.gnews.pri;
+  const url  = base + encodeURIComponent(query);
+  const items = await _fetchRssFeed(url);
+  return items.slice(0, count).map(it => {
+    // Google News 標題格式：「標題 - 來源名稱」
+    const m = it.title.match(/^(.*?)\s+-\s+([^-\u2014]+)$/);
+    return {
+      ...it,
+      title:     m ? m[1].trim() : it.title,
+      publisher: m ? m[2].trim() : '',
+    };
+  });
+}
+
 async function fetchPortNews() {
   const el = id('portNews');
   const valid = portfolio.filter(Boolean);
@@ -2401,7 +2420,7 @@ async function fetchPortNews() {
     setHtml(el, '<div class="loading"><i class="fa-solid fa-circle-notch"></i> 載入中...</div>');
   }
 
-  // ② 取中文名稱（限 5s，不阻塞主流程）
+  // ② 取中文名稱（限 5s，用於 Google News 查詢關鍵字）
   await Promise.race([
     fetchTwseNames(valid).catch(() => {}),
     new Promise(r => setTimeout(r, 5000))
@@ -2409,63 +2428,52 @@ async function fetchPortNews() {
 
   const stocks10 = valid.slice(0, 10);
 
-  // ③ 主接口：UDN RSS + 關鍵字過濾（股票代號或中文名稱出現在標題中）
+  // ③ 主接口：Google News 搜尋 RSS（中文名稱為主，代號為輔）
   let allItems = [];
-  const rssResults = await Promise.allSettled([
-    _fetchRssFeed(APIS.udn_fin.pri),
-    _fetchRssFeed(APIS.udn_fin.bak),
-  ]);
-  const rssPool = [];
-  rssResults.forEach(r => { if (r.status === 'fulfilled') rssPool.push(...r.value); });
+  const gnJobs = stocks10.map(async stock => {
+    const cn = _twseNameCache[stock] || '';
+    const q  = cn || stock;                 // 有中文名用中文名，否則用代號
+    const items = await _fetchGNews(q, 3);
+    return items.map(n => ({ ...n, _ticker: stock, _name: cn || stock, _ts: n.ts }));
+  });
+  const gnRes = await Promise.allSettled(gnJobs);
+  gnRes.forEach(r => { if (r.status === 'fulfilled') allItems.push(...r.value); });
+  console.info('[PortNews] Google News 主接口取得', allItems.length, '筆');
 
-  for (const item of rssPool) {
-    const hay = (item.title + ' ' + item.description).toLowerCase();
-    for (const stock of stocks10) {
-      const cn = (_twseNameCache[stock] || '').toLowerCase();
-      if (hay.includes(stock.toLowerCase()) || (cn && hay.includes(cn))) {
-        allItems.push({ ...item, _ticker: stock, _name: _twseNameCache[stock] || stock, _ts: item.ts });
-        break;
+  // ④ 備援接口：Google News 第二語系（主接口結果不足 3 筆）
+  if (allItems.length < 3) {
+    const gnBakJobs = stocks10.map(async stock => {
+      const cn = _twseNameCache[stock] || '';
+      const q  = cn || stock;
+      const items = await _fetchGNews(q, 3, true);
+      return items.map(n => ({ ...n, _ticker: stock, _name: cn || stock, _ts: n.ts }));
+    });
+    const gnBakRes = await Promise.allSettled(gnBakJobs);
+    gnBakRes.forEach(r => { if (r.status === 'fulfilled') allItems.push(...r.value); });
+    console.info('[PortNews] Google News 備援接口補充至', allItems.length, '筆');
+  }
+
+  // ⑤ 最終備援：UDN RSS 過濾
+  if (allItems.length < 3) {
+    const rssResults = await Promise.allSettled([
+      _fetchRssFeed(APIS.udn_fin.pri),
+      _fetchRssFeed(APIS.udn_fin.bak),
+    ]);
+    const rssPool = [];
+    rssResults.forEach(r => { if (r.status === 'fulfilled') rssPool.push(...r.value); });
+    for (const item of rssPool) {
+      const hay = (item.title + ' ' + item.description).toLowerCase();
+      for (const stock of stocks10) {
+        const cn = (_twseNameCache[stock] || '').toLowerCase();
+        if (hay.includes(stock.toLowerCase()) || (cn && hay.includes(cn))) {
+          allItems.push({ ...item, _ticker: stock, _name: _twseNameCache[stock] || stock, _ts: item.ts });
+          break;
+        }
       }
     }
   }
-  console.info('[PortNews] RSS 篩出', allItems.length, '筆');
 
-  // ④ 備援接口：Yahoo Finance Search（RSS 結果不足 3 筆時啟用）
-  if (allItems.length < 3) {
-    const withTout = (p, ms = 12000) =>
-      Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
-    const _fetchAllYF = async (baseUrl) => {
-      const jobs = stocks10.map(async stock => {
-        const cnName = _twseNameCache[stock] || '';
-        const params = `${encodeURIComponent(stock + '.TW')}&lang=zh-TW&region=TW&quotesCount=0&newsCount=3&enableFuzzyQuery=false`;
-        try {
-          const r = await proxyFetch(baseUrl + params);
-          const d = JSON.parse(await r.text());
-          return (d.news || [])
-            .map(n => ({ title: n.title||'', link: n.link||'', publisher: n.publisher||'',
-                          ts: (n.providerPublishTime||0)*1000, _ts: (n.providerPublishTime||0)*1000,
-                          _ticker: stock, _name: cnName||stock }))
-            .filter(n => n.title && n.link);
-        } catch (_) { return []; }
-      });
-      const res = await Promise.allSettled(jobs);
-      const all = [];
-      res.forEach(r => { if (r.status === 'fulfilled') all.push(...r.value); });
-      return all;
-    };
-    try {
-      const yfItems = await withTout(_fetchAllYF(APIS.yf_search.pri));
-      if (yfItems.length) { allItems.push(...yfItems); console.info('[PortNews] YF 主接口補充', yfItems.length, '筆'); }
-    } catch (_) {}
-    if (allItems.length < 3 && APIS.yf_search.bak) {
-      try {
-        const yfItems2 = await withTout(_fetchAllYF(APIS.yf_search.bak));
-        if (yfItems2.length) { allItems.push(...yfItems2); console.info('[PortNews] YF 備援接口補充', yfItems2.length, '筆'); }
-      } catch (_) {}
-    }
-  }
-
-  // ⑤ 去重、排序、取 top 10
+  // ⑥ 去重、排序、取 top 10
   const seen = new Set();
   const top = allItems
     .filter(n => { if (!n.title || seen.has(n.title)) return false; seen.add(n.title); return true; })
@@ -2479,7 +2487,7 @@ async function fetchPortNews() {
     return;
   }
 
-  // ⑥ 渲染並存入資料庫
+  // ⑦ 渲染並存入資料庫
   const html = top.map(n => `
     <div class="pn-item">
       <a href="${n.link}" target="_blank" rel="noopener">
@@ -2508,7 +2516,13 @@ function fetchFinCal() {
     { d:'2026-04-07', name:'台灣三大法人買賣超',       cat:'mkt',  note:'TWSE',    url:'https://www.twse.com.tw/' },
     { d:'2026-04-15', name:'台灣外銷訂單（2月）',      cat:'data', note:'經濟部',   url:'https://www.moea.gov.tw/' },
     { d:'2026-04-17', name:'台灣 GDP 初估（Q1）',      cat:'data', note:'主計總處', url:'https://www.dgbas.gov.tw/' },
+    { d:'2026-04-23', name:'台灣 3 月失業率',            cat:'data', note:'主計總處', url:'https://www.dgbas.gov.tw/' },
+    { d:'2026-04-27', name:'台灣 3 月景氣燈號',          cat:'data', note:'國發會',   url:'https://www.ndc.gov.tw/' },
+    { d:'2026-04-29', name:'台股上市公司 Q1 財報截止',  cat:'earn', note:'TWSE',    url:'https://www.twse.com.tw/' },
+    { d:'2026-04-30', name:'台灣 3 月工業生產指數',     cat:'data', note:'經濟部',   url:'https://www.moea.gov.tw/' },
     { d:'2026-05-06', name:'台灣 CPI 公布（4月）',     cat:'data', note:'主計總處', url:'https://www.stat.gov.tw/' },
+    { d:'2026-05-08', name:'台灣 4 月進出口貿易',       cat:'data', note:'財政部',   url:'https://www.mof.gov.tw/' },
+    { d:'2026-05-15', name:'台灣 4 月外銷訂單',         cat:'data', note:'經濟部',   url:'https://www.moea.gov.tw/' },
     { d:'2026-06-18', name:'台灣央行利率決策',          cat:'cbc',  note:'中央銀行', url:'https://www.cbc.gov.tw/' },
     { d:'2026-09-17', name:'台灣央行利率決策',          cat:'cbc',  note:'中央銀行', url:'https://www.cbc.gov.tw/' },
     { d:'2026-12-17', name:'台灣央行利率決策',          cat:'cbc',  note:'中央銀行', url:'https://www.cbc.gov.tw/' },
@@ -2519,22 +2533,37 @@ function fetchFinCal() {
     { d:'2026-04-11', name:'密大消費者信心初值',        cat:'data', note:'UofM',    url:'https://data.sca.isr.umich.edu/' },
     { d:'2026-04-16', name:'美國零售銷售（3月）',       cat:'data', note:'Census',  url:'https://www.census.gov/' },
     { d:'2026-04-17', name:'費城聯準銀行製造業指數',   cat:'data', note:'Fed Philly',url:'https://www.philadelphiafed.org/' },
+    { d:'2026-04-22', name:'美國初領失業金人數',        cat:'data', note:'DOL',     url:'https://www.dol.gov/' },
+    { d:'2026-04-23', name:'美國成屋銷售（3月）',       cat:'data', note:'NAR',     url:'https://www.nar.realtor/' },
+    { d:'2026-04-24', name:'美國新屋銷售（3月）',       cat:'data', note:'Census',  url:'https://www.census.gov/' },
+    { d:'2026-04-28', name:'美國消費者信心（4月）',     cat:'data', note:'Conf Bd', url:'https://www.conference-board.org/' },
     { d:'2026-04-29', name:'FOMC 利率決策',             cat:'fed',  note:'聯準會',  url:'https://www.federalreserve.gov/' },
     { d:'2026-04-30', name:'美國 GDP 初估（Q1）',       cat:'data', note:'BEA',     url:'https://www.bea.gov/' },
     { d:'2026-05-01', name:'美國非農就業（4月）',       cat:'data', note:'BLS',     url:'https://www.bls.gov/' },
+    { d:'2026-05-04', name:'美國 ISM 製造業 PMI',       cat:'data', note:'ISM',     url:'https://www.ismworld.org/' },
     { d:'2026-05-13', name:'美國 CPI 公布（4月）',      cat:'data', note:'BLS',     url:'https://www.bls.gov/' },
     { d:'2026-06-10', name:'FOMC 利率決策',             cat:'fed',  note:'聯準會',  url:'https://www.federalreserve.gov/' },
     // ── 日本 ──
     { d:'2026-04-08', name:'日本 BOJ 議事錄公布',       cat:'cbc',  note:'日本銀行', url:'https://www.boj.or.jp/' },
+    { d:'2026-04-28', name:'日本 BOJ 利率決策',         cat:'cbc',  note:'日本銀行', url:'https://www.boj.or.jp/' },
     // ── 中國 ──
     { d:'2026-04-09', name:'中國 CPI / PPI（3月）',     cat:'data', note:'國家統計局',url:'http://www.stats.gov.cn/' },
     { d:'2026-04-13', name:'中國貿易數據（3月）',       cat:'data', note:'海關總署', url:'http://www.customs.gov.cn/' },
+    { d:'2026-04-30', name:'中國 4 月官方 PMI',         cat:'data', note:'國家統計局',url:'http://www.stats.gov.cn/' },
+    { d:'2026-05-09', name:'中國 CPI / PPI（4月）',     cat:'data', note:'國家統計局',url:'http://www.stats.gov.cn/' },
+    // ── 重要財報（大型權值股）──
+    { d:'2026-04-21', name:'Netflix Q1 財報',           cat:'earn', note:'NFLX',    url:'https://ir.netflix.net/' },
+    { d:'2026-04-23', name:'Alphabet Q1 財報',          cat:'earn', note:'GOOGL',   url:'https://abc.xyz/investor/' },
+    { d:'2026-04-29', name:'Microsoft Q3 財報',         cat:'earn', note:'MSFT',    url:'https://www.microsoft.com/investor' },
+    { d:'2026-04-30', name:'Apple Q2 財報',             cat:'earn', note:'AAPL',    url:'https://investor.apple.com/' },
+    { d:'2026-05-07', name:'NVIDIA Q1 財報',            cat:'earn', note:'NVDA',    url:'https://investor.nvidia.com/' },
   ];
 
   const now   = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const yest  = new Date(today); yest.setDate(yest.getDate() - 1);
-  const end   = new Date(today); end.setDate(end.getDate() + 7);
+  // 視窗延長到 30 天，確保永遠有事件可顯示
+  const end   = new Date(today); end.setDate(end.getDate() + 30);
 
   // 轉換日期字串為 Date
   const toDate = s => { const [y,m,d] = s.split('-').map(Number); return new Date(y,m-1,d); };
