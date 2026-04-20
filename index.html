@@ -2405,14 +2405,24 @@ async function fetchPortNews() {
   const top = allItems
     .filter(n => { if (!n.title || seen.has(n.title)) return false; seen.add(n.title); return true; })
     .sort((a, b) => b._ts - a._ts)
-    .slice(0, 20);
+    .slice(0, 10);
 
   if (!top.length) {
+    // 讀取失敗：優先從 localStorage 資料庫顯示快取
+    try {
+      const stored = JSON.parse(localStorage.getItem('smtm_port_news_db') || 'null');
+      if (stored?.html) {
+        setHtml(el, stored.html +
+          '<p style="font-size:.65rem;color:var(--text3);text-align:center;margin-top:.4rem">（資料庫快取 · ' + fmtTs(stored.ts) + '）</p>');
+        if (id('pnTs')) id('pnTs').textContent = fmtTs(stored.ts);
+        return;
+      }
+    } catch (_) {}
     setHtml(el, `<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 暫無相關新聞<br><small style="color:var(--text3)">請確認自選股已設定</small></div>`);
     return;
   }
 
-  setHtml(el, top.map(n => `
+  const html = top.map(n => `
     <div class="pn-item">
       <a href="${n.link}" target="_blank" rel="noopener">
         <div class="pn-title">${esc(n.title)}</div>
@@ -2422,9 +2432,12 @@ async function fetchPortNews() {
         ${n.publisher ? `<span class="ntime">${esc(n.publisher)}</span>` : ''}
         <span class="ntime">${n._ts ? ago(n._ts) : ''}</span>
       </div>
-    </div>`).join(''));
+    </div>`).join('');
 
-  id('pnTs').textContent = fmtTs(Date.now());
+  // 成功時存入 localStorage 資料庫
+  try { localStorage.setItem('smtm_port_news_db', JSON.stringify({ html, ts: Date.now() })); } catch (_) {}
+  setHtml(el, html);
+  if (id('pnTs')) id('pnTs').textContent = fmtTs(Date.now());
 }
 
 // ==================== FINANCIAL CALENDAR ====================
