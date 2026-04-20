@@ -2560,6 +2560,15 @@ async function fetchReddit() {
   res.forEach(r => { if (r.status === 'fulfilled') allPosts.push(...r.value); });
 
   if (!allPosts.length) {
+    // 全部來源失敗：從 localStorage 回退
+    try {
+      const stored = JSON.parse(localStorage.getItem('smtm_reddit_db') || 'null');
+      if (stored?.html) {
+        setHtml(el, stored.html +
+          '<p style="font-size:.65rem;color:var(--text3);text-align:center;margin-top:.4rem">（資料庫快取 · ' + fmtTs(stored.ts) + '）</p>');
+        return;
+      }
+    } catch (_) {}
     setHtml(el, `<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 載入失敗<br>
       <a href="https://www.reddit.com/r/stocks/" target="_blank">前往 Reddit/stocks</a></div>`);
     return;
@@ -2570,10 +2579,25 @@ async function fetchReddit() {
     .sort((a, b) => b.ups - a.ups)
     .slice(0, 5);
 
+  if (!top.length) {
+    // 載入失敗：從 localStorage 回退
+    try {
+      const stored = JSON.parse(localStorage.getItem('smtm_reddit_db') || 'null');
+      if (stored?.html) {
+        setHtml(el, stored.html +
+          '<p style="font-size:.65rem;color:var(--text3);text-align:center;margin-top:.4rem">（資料庫快取 · ' + fmtTs(stored.ts) + '）</p>');
+        return;
+      }
+    } catch (_) {}
+    setHtml(el, `<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 載入失敗<br>
+      <a href="https://www.reddit.com/r/stocks/" target="_blank">前往 Reddit/stocks</a></div>`);
+    return;
+  }
+
   // 並行翻譯所有標題為繁體中文
   const translated = await Promise.allSettled(top.map(p => translateZhTW(p.title)));
 
-  setHtml(el, top.map((p, i) => {
+  const html = top.map((p, i) => {
     const zhTitle = translated[i]?.status === 'fulfilled' ? translated[i].value : p.title;
     return `
     <div class="reddit-item">
@@ -2588,7 +2612,11 @@ async function fetchReddit() {
         <span class="ntime">${ago(p.created_utc * 1000)}</span>
       </div>
     </div>`;
-  }).join(''));
+  }).join('');
+
+  // 成功時存入 localStorage 資料庫
+  try { localStorage.setItem('smtm_reddit_db', JSON.stringify({ html, ts: Date.now() })); } catch (_) {}
+  setHtml(el, html);
 }
 
 // ==================== PTT (HTML scraping) ====================
@@ -2638,8 +2666,8 @@ async function fetchPTT() {
     const ents = Array.from(doc.querySelectorAll('div.r-ent'));
     if (!ents.length) throw new Error('No .r-ent found');
 
-    // PTT index 由舊到新排列，reverse 後取最新的前 8 篇
-    const posts = ents.reverse().slice(0, 8).map(ent => {
+    // PTT index 由舊到新排列，reverse 後取最新的前 5 篇
+    const posts = ents.reverse().slice(0, 5).map(ent => {
       const titleEl = ent.querySelector('div.title a');
       if (!titleEl) return null; // 已刪除貼文
       const href   = titleEl.getAttribute('href') || '';
@@ -2668,6 +2696,8 @@ async function fetchPTT() {
 
     _pttCache.html = html;
     _pttCache.ts   = Date.now();
+    // 成功時存入 localStorage 資料庫
+    try { localStorage.setItem('smtm_ptt_db', JSON.stringify({ html, ts: Date.now() })); } catch (_) {}
     setHtml(el, html);
 
   } catch (e) {
@@ -2676,6 +2706,15 @@ async function fetchPTT() {
       setHtml(el, _pttCache.html +
         '<p style="font-size:.65rem;color:var(--text3);text-align:center;margin-top:.4rem">（快取資料）</p>');
     } else {
+      // 記憶體快取也無：嘗試 localStorage 資料庫
+      try {
+        const stored = JSON.parse(localStorage.getItem('smtm_ptt_db') || 'null');
+        if (stored?.html) {
+          setHtml(el, stored.html +
+            '<p style="font-size:.65rem;color:var(--text3);text-align:center;margin-top:.4rem">（資料庫快取 · ' + fmtTs(stored.ts) + '）</p>');
+          return;
+        }
+      } catch (_) {}
       setHtml(el, `<div class="err">
         <i class="fa-solid fa-triangle-exclamation"></i> PTT 載入失敗<br>
         <a href="https://www.ptt.cc/bbs/Stock/" target="_blank" rel="noopener">前往 PTT Stock 板</a>
