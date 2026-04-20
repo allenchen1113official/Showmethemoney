@@ -2562,8 +2562,8 @@ function fetchFinCal() {
   const now   = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const yest  = new Date(today); yest.setDate(yest.getDate() - 1);
-  // 視窗延長到 30 天，確保永遠有事件可顯示
-  const end   = new Date(today); end.setDate(end.getDate() + 30);
+  // 視窗：昨天、今天、未來 7 天
+  const end   = new Date(today); end.setDate(end.getDate() + 7);
 
   // 轉換日期字串為 Date
   const toDate = s => { const [y,m,d] = s.split('-').map(Number); return new Date(y,m-1,d); };
