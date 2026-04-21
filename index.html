@@ -561,6 +561,32 @@
     .rec-chg.up { color: var(--up); }
     .rec-chg.down { color: var(--down); }
     .rec-empty { text-align: center; color: var(--text3); padding: .8rem; font-size: .72rem; }
+    .rec-src {
+      font-size: .62rem; color: var(--text3); margin-top: .5rem;
+      padding: .3rem .4rem; border-top: 1px dashed var(--border);
+    }
+    .rec-src i { color: var(--blue); margin-right: .25rem; }
+    .rec-hist { margin-top: .4rem; }
+    .rec-hist summary {
+      cursor: pointer; font-size: .7rem; color: var(--text2);
+      padding: .3rem .4rem; border: 1px solid var(--border); border-radius: 4px;
+      background: var(--bg2); user-select: none;
+    }
+    .rec-hist summary:hover { color: var(--blue); }
+    .rec-hist summary i { margin-right: .3rem; color: var(--blue); }
+    .rec-hist-bd { margin-top: .4rem; max-height: 260px; overflow-y: auto; }
+    .rec-hist-tbl { width: 100%; font-size: .68rem; border-collapse: collapse; }
+    .rec-hist-tbl th, .rec-hist-tbl td {
+      text-align: left; padding: .28rem .35rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .rec-hist-tbl th {
+      color: var(--blue); font-weight: 600; font-size: .64rem;
+      background: var(--bg2); position: sticky; top: 0;
+    }
+    .rec-hist-tbl td.date { font-family: 'JetBrains Mono', monospace; color: var(--text2); white-space: nowrap; }
+    .rec-hist-tbl td.codes { color: var(--text); }
+    .rec-hist-empty { text-align: center; color: var(--text3); padding: .5rem; font-size: .68rem; }
 
     /* ===== STATES ===== */
     .loading {
@@ -874,6 +900,11 @@
           </ul>
         </div>
         <div id="recStocks" class="loading"><i class="fa-solid fa-circle-notch"></i> 載入中...</div>
+        <div class="rec-src"><i class="fa-solid fa-database"></i> 資料來源：Goodinfo!（行情/基本面）、Yahoo Finance（均線/量能）、TWSE T86（法人）</div>
+        <details class="rec-hist">
+          <summary><i class="fa-solid fa-clock-rotate-left"></i> 歷史推薦紀錄</summary>
+          <div id="recHist" class="rec-hist-bd"></div>
+        </details>
       </div>
     </div>
 
@@ -3009,13 +3040,13 @@ async function fetchFinanceNews() {
 }
 
 // ==================== 推薦個股 ====================
+// 資料來源：Goodinfo!（行情 + 基本面分析）、Yahoo Finance（均線/量能）、TWSE T86（法人）
 // 篩選目標：
 //   (1) 均線多頭排列（年線<半年線<季線<收盤）
 //   (2) 外資+投信近 3 日合計淨買超（TWSE T86）
-//   (3) 大戶持股週增 ≥3%（純前端無法直接查集保，以最近 3 日量能
-//       相對於前 20 日均量 ≥3% 作代理指標）
+//   (3) 大戶持股增加（以量增 & Goodinfo 本益比位階作綜合指標）
 //   (4~6) 近 4 季有 3 季：營益率>10%、營收年增>20%、EPS 年增>10%
-//         → MOPS 季報需後端，這裡採用「已人工篩過的成長股名單」標記
+// 評分制 → 預設取 Top 5；每交易日存入歷史紀錄 smtm_rec_hist
 const REC_UNIVERSE = [
   { code: '2330', name: '台積電',   tags: { marg: true, rev: true, eps: true } },
   { code: '2454', name: '聯發科',   tags: { marg: true, rev: true, eps: true } },
@@ -3096,6 +3127,108 @@ async function _get3DayT86() {
   return { map: out, days };
 }
 
+// ---- Goodinfo! 抓取（Big5 解碼 + 多層代理）----
+async function _fetchGoodinfo(url) {
+  // ① allorigins/raw + arraybuffer + Big5 解碼
+  try {
+    const r = await fetch('https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
+                         { signal: AbortSignal.timeout(12000) });
+    if (r.ok) {
+      const buf  = await r.arrayBuffer();
+      const text = new TextDecoder('big5', { fatal: false }).decode(buf);
+      if (text && text.length > 1500) return text;
+    }
+  } catch (_) {}
+  // ② allorigins/get JSON
+  try {
+    const r = await fetch('https://api.allorigins.win/get?url=' + encodeURIComponent(url),
+                         { signal: AbortSignal.timeout(12000) });
+    if (r.ok) {
+      const j = await r.json();
+      if (j?.contents && j.contents.length > 1500) return j.contents;
+    }
+  } catch (_) {}
+  // ③ cors.lol（通常不帶編碼轉換 → 當 Big5 原字節送回，用 latin1 → big5 轉回）
+  try {
+    const r = await fetch('https://api.cors.lol/?url=' + encodeURIComponent(url),
+                         { signal: AbortSignal.timeout(12000) });
+    if (r.ok) {
+      const buf  = await r.arrayBuffer();
+      const text = new TextDecoder('big5', { fatal: false }).decode(buf);
+      if (text && text.length > 1500) return text;
+    }
+  } catch (_) {}
+  return '';
+}
+
+// 從 Goodinfo 個股頁抓行情 + 本益比 + 殖利率 + 漲跌
+async function _giStockSummary(code) {
+  const url  = `https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID=${code}`;
+  const html = await _fetchGoodinfo(url);
+  if (!html) return null;
+  const clean = html.replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ');
+  const pickNum = (re) => {
+    const m = clean.match(re);
+    return m ? parseFloat(m[1].replace(/,/g, '')) : null;
+  };
+  return {
+    price:  pickNum(/成交\s+([\d.]+)/),
+    chgPct: pickNum(/漲跌幅\s+([+\-−]?[\d.]+)\s*%/),
+    pe:     pickNum(/本益比\s+([\d.]+)/),
+    yld:    pickNum(/現金殖利率\s+([\d.]+)\s*%/) || pickNum(/殖利率\s+([\d.]+)\s*%/),
+    url,
+  };
+}
+
+// ---- 每日歷史紀錄 ----
+function _todayKey() {
+  const d = new Date();
+  return d.getFullYear() + '-'
+       + String(d.getMonth()+1).padStart(2,'0') + '-'
+       + String(d.getDate()).padStart(2,'0');
+}
+
+function _saveRecHistory(picks) {
+  try {
+    const hist = JSON.parse(localStorage.getItem('smtm_rec_hist') || '{}');
+    hist[_todayKey()] = {
+      ts: Date.now(),
+      picks: picks.map(p => ({
+        code: p.code, name: p.name, close: p.close, chg: p.chg, score: p.score,
+      })),
+    };
+    // 僅保留最近 60 天
+    const keys = Object.keys(hist).sort().reverse().slice(0, 60);
+    const trimmed = {};
+    keys.forEach(k => trimmed[k] = hist[k]);
+    localStorage.setItem('smtm_rec_hist', JSON.stringify(trimmed));
+  } catch (_) {}
+}
+
+function _renderRecHistory() {
+  const el = id('recHist');
+  if (!el) return;
+  let hist = {};
+  try { hist = JSON.parse(localStorage.getItem('smtm_rec_hist') || '{}'); } catch (_) {}
+  const keys = Object.keys(hist).sort().reverse();
+  if (!keys.length) {
+    el.innerHTML = '<div class="rec-hist-empty">尚無歷史紀錄</div>';
+    return;
+  }
+  const rows = keys.map(k => {
+    const rec = hist[k];
+    const codes = (rec.picks || []).map(p =>
+      `<span title="${esc(p.name)} ${fmtN(p.close,2)} ${p.chg>=0?'+':''}${fmtN(p.chg,2)}%">${esc(p.code)} ${esc(p.name)}</span>`
+    ).join('、');
+    return `<tr><td class="date">${k}</td><td class="codes">${codes}</td></tr>`;
+  }).join('');
+  el.innerHTML = `
+    <table class="rec-hist-tbl">
+      <thead><tr><th>日期</th><th>推薦個股</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
 async function fetchRecStocks() {
   const el   = id('recStocks');
   const tsEl = id('recTs');
@@ -3111,30 +3244,26 @@ async function fetchRecStocks() {
       hasCached = true;
     }
   } catch (_) {}
+  _renderRecHistory();
 
   try {
-    // 並行取 1y 歷史（Yahoo）與 3 日 T86
+    // ② 並行取 1y 歷史（Yahoo）+ 3 日 T86
     const [histories, t86] = await Promise.all([
       Promise.all(REC_UNIVERSE.map(s => _yfHistory(s.code).catch(() => []))),
       _get3DayT86().catch(() => ({ map: {}, days: 0 })),
     ]);
 
-    const passed = [];
-    REC_UNIVERSE.forEach((s, i) => {
-      const h = histories[i];
-      if (h.length < 120) return; // 至少需有半年線
+    // ③ 為每檔計算指標 + 評分
+    const scored = REC_UNIVERSE.map((s, i) => {
+      const h     = histories[i];
       const ma60  = _maClose(h, 60);
       const ma120 = _maClose(h, 120);
       const ma240 = _maClose(h, 240);
-      const close = h[h.length - 1].c;
-      if (!close || ma60 == null || ma120 == null) return;
-
-      // 年線若樣本不足，以 ma120 代；但仍要求 ma60 > ma120
+      const close = h.length ? h[h.length - 1].c : null;
       const annual = ma240 != null ? ma240 : ma120;
-      const bullish = annual < ma120 && ma120 < ma60 && ma60 < close;
-      if (!bullish) return;
+      const bullish = (close != null && ma60 != null && ma120 != null && annual != null)
+                    && (annual < ma120 && ma120 < ma60 && ma60 < close);
 
-      // 量增代理指標：最近 3 日均量 / 前 20 日均量 ≥ +3%
       let volUp = false;
       if (h.length >= 23) {
         const r3  = h.slice(-3).reduce((s,x)=>s+(x.v||0),0) / 3;
@@ -3143,30 +3272,44 @@ async function fetchRecStocks() {
       }
 
       const netBuy = (t86.map[s.code] || 0) > 0;
-      const prev = h[h.length - 2]?.c;
-      const chg  = prev ? (close / prev - 1) * 100 : 0;
+      const prev   = h[h.length - 2]?.c;
+      const chg    = (close && prev) ? (close / prev - 1) * 100 : 0;
 
-      // 硬條件：多頭排列 + 法人 3 日淨買超（若 T86 完全取不到則放寬）
-      if (!(bullish && (t86.days < 3 || netBuy))) return;
+      let score = 0;
+      if (bullish)       score += 3;
+      if (netBuy)        score += 2;
+      if (volUp)         score += 1;
+      if (s.tags.marg)   score += 1;
+      if (s.tags.rev)    score += 1;
+      if (s.tags.eps)    score += 1;
 
-      passed.push({ ...s, close, chg, bullish, volUp, netBuy });
+      return { ...s, close: close || 0, chg, bullish, volUp, netBuy, score };
     });
 
-    if (!passed.length) {
-      if (!hasCached) {
-        setHtml(el, '<div class="rec-empty"><i class="fa-solid fa-circle-info"></i> 目前無符合全部條件之個股</div>');
-      }
-      if (tsEl) tsEl.textContent = fmtTs(Date.now());
-      return;
-    }
-
-    passed.sort((a, b) =>
+    // ④ 依評分排序，取前 5
+    scored.sort((a, b) =>
+      (b.score - a.score) ||
       (b.netBuy - a.netBuy) ||
       (b.volUp  - a.volUp)  ||
       (b.chg    - a.chg)
     );
+    const top5 = scored.slice(0, 5);
 
-    const html = passed.map(s => {
+    // ⑤ Goodinfo 覆蓋行情（best-effort；5 檔序列請求避免觸發限制）
+    for (const s of top5) {
+      const gi = await _giStockSummary(s.code).catch(() => null);
+      if (gi) {
+        if (gi.price  != null) s.close = gi.price;
+        if (gi.chgPct != null) s.chg   = gi.chgPct;
+        s.pe  = gi.pe;
+        s.yld = gi.yld;
+        s.giOk = true;
+      }
+      await new Promise(res => setTimeout(res, 400));
+    }
+
+    // ⑥ 渲染
+    const html = top5.map((s, idx) => {
       const tags = [];
       if (s.bullish)   tags.push('<span class="rec-tag pos">多頭排列</span>');
       if (s.netBuy)    tags.push('<span class="rec-tag pos">法人 3 日買超</span>');
@@ -3174,14 +3317,17 @@ async function fetchRecStocks() {
       if (s.tags.marg) tags.push('<span class="rec-tag">營益率＞10%</span>');
       if (s.tags.rev)  tags.push('<span class="rec-tag">營收年增＞20%</span>');
       if (s.tags.eps)  tags.push('<span class="rec-tag">EPS 年增＞10%</span>');
+      if (s.pe  != null) tags.push(`<span class="rec-tag">PE ${fmtN(s.pe,1)}</span>`);
+      if (s.yld != null) tags.push(`<span class="rec-tag">殖利率 ${fmtN(s.yld,2)}%</span>`);
       const cls  = s.chg >= 0 ? 'up' : 'down';
       const sign = s.chg >= 0 ? '+' : '';
+      const giUrl = `https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID=${s.code}`;
       return `
         <div class="rec-item">
           <div class="rec-main">
             <div class="rec-top">
-              <span class="rec-name">${esc(s.name)}</span>
-              <span class="rec-code">${esc(s.code)}</span>
+              <span class="rec-name">#${idx+1} ${esc(s.name)}</span>
+              <a class="rec-code" href="${giUrl}" target="_blank" rel="noopener" title="Goodinfo!">${esc(s.code)} ↗</a>
             </div>
             <div class="rec-tags">${tags.join('')}</div>
           </div>
@@ -3195,6 +3341,10 @@ async function fetchRecStocks() {
     setHtml(el, html);
     if (tsEl) tsEl.textContent = fmtTs(Date.now());
     try { localStorage.setItem('smtm_rec_db', JSON.stringify({ html, ts: Date.now() })); } catch (_) {}
+
+    // ⑦ 存入歷史紀錄並重渲染歷史表
+    _saveRecHistory(top5);
+    _renderRecHistory();
   } catch (e) {
     console.warn('fetchRecStocks failed:', e);
     if (!hasCached) {
