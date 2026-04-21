@@ -3180,41 +3180,80 @@ async function _giStockSummary(code) {
   };
 }
 
-// ---- 每日歷史紀錄 ----
-function _todayKey() {
-  const d = new Date();
-  return d.getFullYear() + '-'
-       + String(d.getMonth()+1).padStart(2,'0') + '-'
-       + String(d.getDate()).padStart(2,'0');
+// ---- 每日歷史紀錄（以 smtm_rec_hist 作為唯一資料表）----
+// entry 結構：{ ts, picks: [{ code, name, close, chg, bullish, netBuy, volUp, tags, pe, yld }, ...] }
+
+function _loadRecHist() {
+  try { return JSON.parse(localStorage.getItem('smtm_rec_hist') || '{}') || {}; }
+  catch (_) { return {}; }
 }
 
-function _saveRecHistory(picks) {
-  try {
-    const hist = JSON.parse(localStorage.getItem('smtm_rec_hist') || '{}');
-    hist[_todayKey()] = {
-      ts: Date.now(),
-      picks: picks.map(p => ({
-        code: p.code, name: p.name, close: p.close, chg: p.chg, score: p.score,
-      })),
-    };
-    // 僅保留最近 60 天
-    const keys = Object.keys(hist).sort().reverse().slice(0, 60);
-    const trimmed = {};
-    keys.forEach(k => trimmed[k] = hist[k]);
-    localStorage.setItem('smtm_rec_hist', JSON.stringify(trimmed));
-  } catch (_) {}
+function _writeRecHist(hist) {
+  const keys = Object.keys(hist).sort().reverse().slice(0, 60);
+  const trimmed = {};
+  keys.forEach(k => trimmed[k] = hist[k]);
+  try { localStorage.setItem('smtm_rec_hist', JSON.stringify(trimmed)); } catch (_) {}
+}
+
+// 最近一個交易日 key（YYYY-MM-DD）
+// 台股收盤 13:30，以 14:00 後視為當日已完成；否則回推前一交易日
+function _lastTradingDayKey() {
+  const n = new Date();
+  const cursor = new Date(n.getFullYear(), n.getMonth(), n.getDate());
+  const minutesNow = n.getHours() * 60 + n.getMinutes();
+  const isDoneToday = minutesNow >= 14 * 60;
+  if (!isDoneToday) cursor.setDate(cursor.getDate() - 1);
+  while (cursor.getDay() === 0 || cursor.getDay() === 6) {
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return cursor.getFullYear() + '-'
+       + String(cursor.getMonth()+1).padStart(2,'0') + '-'
+       + String(cursor.getDate()).padStart(2,'0');
+}
+
+// 以一筆 entry 渲染個股列（不再依賴 _rec_db 的 HTML 快取）
+function _renderRecPicks(entry, dateKey) {
+  const el = id('recStocks');
+  const tsEl = id('recTs');
+  if (!el || !entry?.picks?.length) return;
+  const html = entry.picks.map((s, idx) => {
+    const tags = [];
+    if (s.bullish)            tags.push('<span class="rec-tag pos">多頭排列</span>');
+    if (s.netBuy)             tags.push('<span class="rec-tag pos">法人 3 日買超</span>');
+    if (s.volUp)              tags.push('<span class="rec-tag">量增 ≥3%</span>');
+    if (s.tags?.marg)         tags.push('<span class="rec-tag">營益率＞10%</span>');
+    if (s.tags?.rev)          tags.push('<span class="rec-tag">營收年增＞20%</span>');
+    if (s.tags?.eps)          tags.push('<span class="rec-tag">EPS 年增＞10%</span>');
+    if (s.pe  != null)        tags.push(`<span class="rec-tag">PE ${fmtN(s.pe,1)}</span>`);
+    if (s.yld != null)        tags.push(`<span class="rec-tag">殖利率 ${fmtN(s.yld,2)}%</span>`);
+    const cls  = s.chg >= 0 ? 'up' : 'down';
+    const sign = s.chg >= 0 ? '+' : '';
+    const giUrl = `https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID=${s.code}`;
+    return `
+      <div class="rec-item">
+        <div class="rec-main">
+          <div class="rec-top">
+            <span class="rec-name">#${idx+1} ${esc(s.name)}</span>
+            <a class="rec-code" href="${giUrl}" target="_blank" rel="noopener" title="Goodinfo!">${esc(s.code)} ↗</a>
+          </div>
+          <div class="rec-tags">${tags.join('')}</div>
+        </div>
+        <div class="rec-right">
+          <div class="rec-price">${fmtN(s.close, 2)}</div>
+          <div class="rec-chg ${cls}">${sign}${fmtN(s.chg, 2)}%</div>
+        </div>
+      </div>`;
+  }).join('');
+  setHtml(el, html);
+  if (tsEl) tsEl.textContent = (dateKey || '') + ' · ' + fmtTs(entry.ts || Date.now());
 }
 
 function _renderRecHistory() {
   const el = id('recHist');
   if (!el) return;
-  let hist = {};
-  try { hist = JSON.parse(localStorage.getItem('smtm_rec_hist') || '{}'); } catch (_) {}
+  const hist = _loadRecHist();
   const keys = Object.keys(hist).sort().reverse();
-  if (!keys.length) {
-    el.innerHTML = '<div class="rec-hist-empty">尚無歷史紀錄</div>';
-    return;
-  }
+  if (!keys.length) { el.innerHTML = '<div class="rec-hist-empty">尚無歷史紀錄</div>'; return; }
   const rows = keys.map(k => {
     const rec = hist[k];
     const codes = (rec.picks || []).map(p =>
@@ -3229,127 +3268,112 @@ function _renderRecHistory() {
     </table>`;
 }
 
+// 實際計算 Top 5（Yahoo 歷史 + TWSE T86 + Goodinfo 增補）
+async function _computeRecPicks() {
+  const [histories, t86] = await Promise.all([
+    Promise.all(REC_UNIVERSE.map(s => _yfHistory(s.code).catch(() => []))),
+    _get3DayT86().catch(() => ({ map: {}, days: 0 })),
+  ]);
+
+  const scored = REC_UNIVERSE.map((s, i) => {
+    const h     = histories[i];
+    const ma60  = _maClose(h, 60);
+    const ma120 = _maClose(h, 120);
+    const ma240 = _maClose(h, 240);
+    const close = h.length ? h[h.length - 1].c : null;
+    const annual = ma240 != null ? ma240 : ma120;
+    const bullish = (close != null && ma60 != null && ma120 != null && annual != null)
+                  && (annual < ma120 && ma120 < ma60 && ma60 < close);
+
+    let volUp = false;
+    if (h.length >= 23) {
+      const r3  = h.slice(-3).reduce((s,x)=>s+(x.v||0),0) / 3;
+      const r20 = h.slice(-23,-3).reduce((s,x)=>s+(x.v||0),0) / 20;
+      if (r20 > 0) volUp = (r3 / r20 - 1) >= 0.03;
+    }
+
+    const netBuy = (t86.map[s.code] || 0) > 0;
+    const prev   = h[h.length - 2]?.c;
+    const chg    = (close && prev) ? (close / prev - 1) * 100 : 0;
+
+    let score = 0;
+    if (bullish)     score += 3;
+    if (netBuy)      score += 2;
+    if (volUp)       score += 1;
+    if (s.tags.marg) score += 1;
+    if (s.tags.rev)  score += 1;
+    if (s.tags.eps)  score += 1;
+
+    return {
+      code: s.code, name: s.name, tags: s.tags,
+      close: close || 0, chg, bullish, volUp, netBuy, score,
+    };
+  });
+
+  scored.sort((a, b) =>
+    (b.score - a.score) ||
+    (b.netBuy - a.netBuy) ||
+    (b.volUp  - a.volUp)  ||
+    (b.chg    - a.chg)
+  );
+  const top5 = scored.slice(0, 5);
+
+  // Goodinfo 增補（best-effort）
+  for (const s of top5) {
+    const gi = await _giStockSummary(s.code).catch(() => null);
+    if (gi) {
+      if (gi.price  != null) s.close = gi.price;
+      if (gi.chgPct != null) s.chg   = gi.chgPct;
+      if (gi.pe     != null) s.pe    = gi.pe;
+      if (gi.yld    != null) s.yld   = gi.yld;
+    }
+    await new Promise(res => setTimeout(res, 350));
+  }
+  return top5;
+}
+
+let _recRefreshing = false;
 async function fetchRecStocks() {
-  const el   = id('recStocks');
-  const tsEl = id('recTs');
+  const el = id('recStocks');
   if (!el) return;
 
-  // ① 快取先顯示
-  let hasCached = false;
-  try {
-    const stored = JSON.parse(localStorage.getItem('smtm_rec_db') || 'null');
-    if (stored?.html) {
-      setHtml(el, stored.html);
-      if (tsEl) tsEl.textContent = fmtTs(stored.ts);
-      hasCached = true;
-    }
-  } catch (_) {}
+  // ① 先從資料表讀最新一筆並立即渲染（避免卡「載入中」）
+  const hist = _loadRecHist();
+  const existingKeys = Object.keys(hist).sort().reverse();
+  if (existingKeys.length) {
+    _renderRecPicks(hist[existingKeys[0]], existingKeys[0]);
+  }
   _renderRecHistory();
 
+  // ② 若最近交易日已有紀錄 → 不再重新計算
+  const lastKey = _lastTradingDayKey();
+  if (hist[lastKey]) return;
+
+  // ③ 尚未有今日（最近交易日）紀錄 → 背景計算
+  if (_recRefreshing) return;
+  _recRefreshing = true;
+
+  // 若完全沒有歷史紀錄，顯示載入提示
+  if (!existingKeys.length) {
+    setHtml(el, '<div class="rec-empty"><i class="fa-solid fa-circle-notch fa-spin"></i> 首次載入中，請稍候…</div>');
+  }
+
   try {
-    // ② 並行取 1y 歷史（Yahoo）+ 3 日 T86
-    const [histories, t86] = await Promise.all([
-      Promise.all(REC_UNIVERSE.map(s => _yfHistory(s.code).catch(() => []))),
-      _get3DayT86().catch(() => ({ map: {}, days: 0 })),
-    ]);
-
-    // ③ 為每檔計算指標 + 評分
-    const scored = REC_UNIVERSE.map((s, i) => {
-      const h     = histories[i];
-      const ma60  = _maClose(h, 60);
-      const ma120 = _maClose(h, 120);
-      const ma240 = _maClose(h, 240);
-      const close = h.length ? h[h.length - 1].c : null;
-      const annual = ma240 != null ? ma240 : ma120;
-      const bullish = (close != null && ma60 != null && ma120 != null && annual != null)
-                    && (annual < ma120 && ma120 < ma60 && ma60 < close);
-
-      let volUp = false;
-      if (h.length >= 23) {
-        const r3  = h.slice(-3).reduce((s,x)=>s+(x.v||0),0) / 3;
-        const r20 = h.slice(-23,-3).reduce((s,x)=>s+(x.v||0),0) / 20;
-        if (r20 > 0) volUp = (r3 / r20 - 1) >= 0.03;
-      }
-
-      const netBuy = (t86.map[s.code] || 0) > 0;
-      const prev   = h[h.length - 2]?.c;
-      const chg    = (close && prev) ? (close / prev - 1) * 100 : 0;
-
-      let score = 0;
-      if (bullish)       score += 3;
-      if (netBuy)        score += 2;
-      if (volUp)         score += 1;
-      if (s.tags.marg)   score += 1;
-      if (s.tags.rev)    score += 1;
-      if (s.tags.eps)    score += 1;
-
-      return { ...s, close: close || 0, chg, bullish, volUp, netBuy, score };
-    });
-
-    // ④ 依評分排序，取前 5
-    scored.sort((a, b) =>
-      (b.score - a.score) ||
-      (b.netBuy - a.netBuy) ||
-      (b.volUp  - a.volUp)  ||
-      (b.chg    - a.chg)
-    );
-    const top5 = scored.slice(0, 5);
-
-    // ⑤ Goodinfo 覆蓋行情（best-effort；5 檔序列請求避免觸發限制）
-    for (const s of top5) {
-      const gi = await _giStockSummary(s.code).catch(() => null);
-      if (gi) {
-        if (gi.price  != null) s.close = gi.price;
-        if (gi.chgPct != null) s.chg   = gi.chgPct;
-        s.pe  = gi.pe;
-        s.yld = gi.yld;
-        s.giOk = true;
-      }
-      await new Promise(res => setTimeout(res, 400));
-    }
-
-    // ⑥ 渲染
-    const html = top5.map((s, idx) => {
-      const tags = [];
-      if (s.bullish)   tags.push('<span class="rec-tag pos">多頭排列</span>');
-      if (s.netBuy)    tags.push('<span class="rec-tag pos">法人 3 日買超</span>');
-      if (s.volUp)     tags.push('<span class="rec-tag">量增 ≥3%</span>');
-      if (s.tags.marg) tags.push('<span class="rec-tag">營益率＞10%</span>');
-      if (s.tags.rev)  tags.push('<span class="rec-tag">營收年增＞20%</span>');
-      if (s.tags.eps)  tags.push('<span class="rec-tag">EPS 年增＞10%</span>');
-      if (s.pe  != null) tags.push(`<span class="rec-tag">PE ${fmtN(s.pe,1)}</span>`);
-      if (s.yld != null) tags.push(`<span class="rec-tag">殖利率 ${fmtN(s.yld,2)}%</span>`);
-      const cls  = s.chg >= 0 ? 'up' : 'down';
-      const sign = s.chg >= 0 ? '+' : '';
-      const giUrl = `https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID=${s.code}`;
-      return `
-        <div class="rec-item">
-          <div class="rec-main">
-            <div class="rec-top">
-              <span class="rec-name">#${idx+1} ${esc(s.name)}</span>
-              <a class="rec-code" href="${giUrl}" target="_blank" rel="noopener" title="Goodinfo!">${esc(s.code)} ↗</a>
-            </div>
-            <div class="rec-tags">${tags.join('')}</div>
-          </div>
-          <div class="rec-right">
-            <div class="rec-price">${fmtN(s.close, 2)}</div>
-            <div class="rec-chg ${cls}">${sign}${fmtN(s.chg, 2)}%</div>
-          </div>
-        </div>`;
-    }).join('');
-
-    setHtml(el, html);
-    if (tsEl) tsEl.textContent = fmtTs(Date.now());
-    try { localStorage.setItem('smtm_rec_db', JSON.stringify({ html, ts: Date.now() })); } catch (_) {}
-
-    // ⑦ 存入歷史紀錄並重渲染歷史表
-    _saveRecHistory(top5);
+    const picks = await _computeRecPicks();
+    if (!picks?.length) return; // 失敗 → 保留原資料表顯示
+    const entry = { ts: Date.now(), picks };
+    hist[lastKey] = entry;
+    _writeRecHist(hist);
+    _renderRecPicks(entry, lastKey);
     _renderRecHistory();
   } catch (e) {
-    console.warn('fetchRecStocks failed:', e);
-    if (!hasCached) {
-      setHtml(el, '<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 推薦個股載入失敗</div>');
+    console.warn('fetchRecStocks compute failed:', e);
+    // 失敗：若原本就有歷史紀錄，維持顯示；否則才顯示錯誤
+    if (!existingKeys.length) {
+      setHtml(el, '<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 推薦個股載入失敗，請稍後重試</div>');
     }
+  } finally {
+    _recRefreshing = false;
   }
 }
 
