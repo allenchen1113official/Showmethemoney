@@ -1378,10 +1378,46 @@ async function init() {
   loadPortfolio();
   startClock();
   bindModalEvents();
+  preloadCaches();           // ★ 同步渲染 localStorage 快取，避免卡「載入中」
   fetchQuote();
   setInterval(fetchQuote, 10 * 60 * 1000);
   refreshAll();
   refreshTimer = setInterval(refreshAll, CFG.refreshMs);
+}
+
+// 網頁載入即顯示資料表快取（Reddit / PTT / 財經新聞 / 推薦個股）
+function preloadCaches() {
+  // Reddit
+  try {
+    const s = JSON.parse(localStorage.getItem('smtm_reddit_db') || 'null');
+    if (s?.html) setHtml(id('redditContent'), s.html);
+  } catch (_) {}
+  // PTT
+  try {
+    const s = JSON.parse(localStorage.getItem('smtm_ptt_db') || 'null');
+    if (s?.html) setHtml(id('pttContent'), s.html);
+  } catch (_) {}
+  // 財經新聞
+  try {
+    const s = JSON.parse(localStorage.getItem('smtm_fin_news_db') || 'null');
+    if (s?.html) setHtml(id('finContent'), s.html);
+  } catch (_) {}
+  // 推薦個股（由資料表直接渲染）
+  try {
+    if (typeof _loadRecHist === 'function') {
+      const hist = _loadRecHist();
+      const keys = Object.keys(hist).sort().reverse();
+      if (keys.length) {
+        _renderRecPicks(hist[keys[0]], keys[0]);
+        _renderRecHistory();
+      }
+    }
+  } catch (_) {}
+  // 自選股新聞
+  try {
+    const s = JSON.parse(localStorage.getItem('smtm_port_news_db') || 'null');
+    if (s?.html) setHtml(id('portNews'), s.html);
+  } catch (_) {}
 }
 
 function loadPortfolio() {
@@ -2725,8 +2761,23 @@ async function translateZhTW(text) {
 }
 
 // ==================== REDDIT ====================
+// 立即從資料表渲染 Reddit 快取（避免卡「載入中」）
+function _renderRedditFromDB() {
+  const el = id('redditContent');
+  if (!el) return false;
+  try {
+    const stored = JSON.parse(localStorage.getItem('smtm_reddit_db') || 'null');
+    if (stored?.html) {
+      setHtml(el, stored.html);
+      return true;
+    }
+  } catch (_) {}
+  return false;
+}
+
 async function fetchReddit() {
   const el = id('redditContent');
+  const hasCached = _renderRedditFromDB(); // ① 先顯示資料表
   const subs = ['Stocks', 'investing', 'wallstreetbets'];
   const allPosts = [];
 
@@ -2751,15 +2802,8 @@ async function fetchReddit() {
   res.forEach(r => { if (r.status === 'fulfilled') allPosts.push(...r.value); });
 
   if (!allPosts.length) {
-    // 全部來源失敗：從 localStorage 回退
-    try {
-      const stored = JSON.parse(localStorage.getItem('smtm_reddit_db') || 'null');
-      if (stored?.html) {
-        setHtml(el, stored.html +
-          '<p style="font-size:.65rem;color:var(--text3);text-align:center;margin-top:.4rem">（資料庫快取 · ' + fmtTs(stored.ts) + '）</p>');
-        return;
-      }
-    } catch (_) {}
+    // 失敗：若已有資料表快取就保留顯示，不覆蓋
+    if (hasCached) return;
     setHtml(el, `<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 載入失敗<br>
       <a href="https://www.reddit.com/r/stocks/" target="_blank">前往 Reddit/stocks</a></div>`);
     return;
@@ -2771,15 +2815,7 @@ async function fetchReddit() {
     .slice(0, 5);
 
   if (!top.length) {
-    // 載入失敗：從 localStorage 回退
-    try {
-      const stored = JSON.parse(localStorage.getItem('smtm_reddit_db') || 'null');
-      if (stored?.html) {
-        setHtml(el, stored.html +
-          '<p style="font-size:.65rem;color:var(--text3);text-align:center;margin-top:.4rem">（資料庫快取 · ' + fmtTs(stored.ts) + '）</p>');
-        return;
-      }
-    } catch (_) {}
+    if (hasCached) return;
     setHtml(el, `<div class="err"><i class="fa-solid fa-triangle-exclamation"></i> 載入失敗<br>
       <a href="https://www.reddit.com/r/stocks/" target="_blank">前往 Reddit/stocks</a></div>`);
     return;
@@ -2842,14 +2878,26 @@ async function _fetchPttHtml() {
   ]);
 }
 
+function _renderPttFromDB() {
+  const el = id('pttContent');
+  if (!el) return false;
+  try {
+    const stored = JSON.parse(localStorage.getItem('smtm_ptt_db') || 'null');
+    if (stored?.html) { setHtml(el, stored.html); return true; }
+  } catch (_) {}
+  return false;
+}
+
 async function fetchPTT() {
   const el = id('pttContent');
 
-  // 有效快取直接使用
-  if (_pttCache.html && Date.now() - _pttCache.ts < PTT_TTL) {
-    setHtml(el, _pttCache.html);
-    return;
-  }
+  // ① 立即從資料表渲染，避免卡「載入中」
+  const hasCached = _pttCache.html
+    ? (setHtml(el, _pttCache.html), true)
+    : _renderPttFromDB();
+
+  // 有效記憶體快取直接結束
+  if (_pttCache.html && Date.now() - _pttCache.ts < PTT_TTL) return;
 
   try {
     const htmlText = await _fetchPttHtml();
@@ -2893,24 +2941,12 @@ async function fetchPTT() {
 
   } catch (e) {
     console.warn('[PTT]', e.message);
-    if (_pttCache.html) {
-      setHtml(el, _pttCache.html +
-        '<p style="font-size:.65rem;color:var(--text3);text-align:center;margin-top:.4rem">（快取資料）</p>');
-    } else {
-      // 記憶體快取也無：嘗試 localStorage 資料庫
-      try {
-        const stored = JSON.parse(localStorage.getItem('smtm_ptt_db') || 'null');
-        if (stored?.html) {
-          setHtml(el, stored.html +
-            '<p style="font-size:.65rem;color:var(--text3);text-align:center;margin-top:.4rem">（資料庫快取 · ' + fmtTs(stored.ts) + '）</p>');
-          return;
-        }
-      } catch (_) {}
-      setHtml(el, `<div class="err">
-        <i class="fa-solid fa-triangle-exclamation"></i> PTT 載入失敗<br>
-        <a href="https://www.ptt.cc/bbs/Stock/" target="_blank" rel="noopener">前往 PTT Stock 板</a>
-      </div>`);
-    }
+    // 失敗：若已從資料表顯示就保留，不覆蓋
+    if (hasCached) return;
+    setHtml(el, `<div class="err">
+      <i class="fa-solid fa-triangle-exclamation"></i> PTT 載入失敗<br>
+      <a href="https://www.ptt.cc/bbs/Stock/" target="_blank" rel="noopener">前往 PTT Stock 板</a>
+    </div>`);
   }
 }
 
