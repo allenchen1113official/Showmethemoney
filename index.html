@@ -3444,10 +3444,36 @@ function _lastTradingDayKey() {
 }
 
 // 以一筆 entry 渲染個股列（不再依賴 _rec_db 的 HTML 快取）
+// 對 entry.picks 中 close<=0 的個股，背景用 MIS 補報價並回寫資料表
+async function _patchZeroPrices(entry, dateKey) {
+  if (!entry?.picks?.length) return false;
+  const zeros = entry.picks.filter(p => !(p.close > 0));
+  if (!zeros.length) return false;
+  let patched = false;
+  await Promise.all(zeros.map(async p => {
+    const m = await _misPrice(p.code);
+    if (m && m.price > 0) {
+      p.close = m.price;
+      if (!p.chg) p.chg = m.chg || 0;
+      patched = true;
+    }
+  }));
+  if (patched) {
+    const hist = _loadRecHist();
+    if (dateKey) hist[dateKey] = entry;
+    _writeRecHist(hist);
+  }
+  return patched;
+}
+
 function _renderRecPicks(entry, dateKey) {
   const el = id('recStocks');
   const tsEl = id('recTs');
   if (!el || !entry?.picks?.length) return;
+  // 非同步補齊 0 價位並重繪
+  _patchZeroPrices(entry, dateKey).then(patched => {
+    if (patched) _renderRecPicks(entry, dateKey);
+  });
   const html = entry.picks.map((s, idx) => {
     const tags = [];
     if (s.bullish)            tags.push('<span class="rec-tag pos">多頭排列</span>');
@@ -3471,8 +3497,8 @@ function _renderRecPicks(entry, dateKey) {
           <div class="rec-tags">${tags.join('')}</div>
         </div>
         <div class="rec-right">
-          <div class="rec-price">${fmtN(s.close, 2)}</div>
-          <div class="rec-chg ${cls}">${sign}${fmtN(s.chg, 2)}%</div>
+          <div class="rec-price">${s.close > 0 ? fmtN(s.close, 2) : '--'}</div>
+          <div class="rec-chg ${cls}">${s.close > 0 ? `${sign}${fmtN(s.chg, 2)}%` : ''}</div>
         </div>
       </div>`;
   }).join('');
@@ -3500,7 +3526,26 @@ function _renderRecHistory() {
     </table>`;
 }
 
-// 實際計算 Top 5（Yahoo 歷史 + TWSE T86 + Goodinfo 增補）
+// TWSE MIS 即時行情 fallback（Yahoo / Goodinfo 取不到時使用）
+async function _misPrice(code) {
+  const url = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_${code}.tw|otc_${code}.tw&json=1&delay=0`;
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(6000) });
+    if (!r.ok) return null;
+    const j = await r.json();
+    const rows = j?.msgArray || [];
+    // 優先選擇有即時成交價的列
+    const row = rows.find(m => parseFloat(m.z) > 0) || rows[0];
+    if (!row) return null;
+    const price = parseFloat(row.z) || parseFloat(row.y) || 0;
+    const prev  = parseFloat(row.y) || 0;
+    if (price <= 0) return null;
+    const chg = prev > 0 ? (price / prev - 1) * 100 : 0;
+    return { price, chg };
+  } catch (_) { return null; }
+}
+
+// 實際計算 Top 5（Yahoo 歷史 + TWSE T86 + Goodinfo 增補 + MIS fallback）
 async function _computeRecPicks() {
   const [histories, t86] = await Promise.all([
     Promise.all(REC_UNIVERSE.map(s => _yfHistory(s.code).catch(() => []))),
@@ -3554,14 +3599,38 @@ async function _computeRecPicks() {
   for (const s of top5) {
     const gi = await _giStockSummary(s.code).catch(() => null);
     if (gi) {
-      if (gi.price  != null) s.close = gi.price;
+      if (gi.price  != null && gi.price > 0) s.close = gi.price;
       if (gi.chgPct != null) s.chg   = gi.chgPct;
       if (gi.pe     != null) s.pe    = gi.pe;
       if (gi.yld    != null) s.yld   = gi.yld;
     }
     await new Promise(res => setTimeout(res, 350));
   }
-  return top5;
+
+  // ── MIS fallback：補齊仍為 0 的股價（TWSE 即時報價，CORS 允許）────
+  await Promise.all(top5.map(async s => {
+    if (s.close > 0) return;
+    const m = await _misPrice(s.code);
+    if (m) { s.close = m.price; if (!s.chg) s.chg = m.chg; }
+  }));
+
+  // ── 若仍有 close<=0 者，從評分清單遞補下一檔（並用 MIS 取得報價）──
+  let final = top5.filter(s => s.close > 0);
+  if (final.length < 5) {
+    const used = new Set(final.map(x => x.code));
+    for (const c of scored) {
+      if (final.length >= 5) break;
+      if (used.has(c.code)) continue;
+      if (c.close > 0) { final.push(c); used.add(c.code); continue; }
+      const m = await _misPrice(c.code);
+      if (m && m.price > 0) {
+        c.close = m.price;
+        c.chg   = m.chg || c.chg;
+        final.push(c); used.add(c.code);
+      }
+    }
+  }
+  return final.slice(0, 5);
 }
 
 let _recRefreshing = false;
@@ -3577,9 +3646,11 @@ async function fetchRecStocks() {
   }
   _renderRecHistory();
 
-  // ② 若最近交易日已有紀錄 → 不再重新計算
+  // ② 若最近交易日已有紀錄且全數有效股價 → 不再重新計算
   const lastKey = _lastTradingDayKey();
-  if (hist[lastKey]) return;
+  const cur = hist[lastKey];
+  const allPriced = cur?.picks?.length && cur.picks.every(p => p.close > 0);
+  if (allPriced) return;
 
   // ③ 尚未有今日（最近交易日）紀錄 → 背景計算
   if (_recRefreshing) return;
