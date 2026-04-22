@@ -331,21 +331,58 @@
       border: 1px solid var(--border); border-radius: 4px;
       font-family: inherit; font-size: .82rem;
     }
-    .input-item-row { display: grid; grid-template-columns: 110px 100px 100px; gap: .35rem; margin-bottom: .4rem; align-items: center; }
-    .input-item-row label.idx { font-size: .72rem; color: var(--text3); text-align: right; padding-right: .25rem; }
-    .input-item-row input {
-      padding: .3rem .45rem;
-      background: var(--bg3); color: var(--text);
-      border: 1px solid var(--border); border-radius: 4px;
-      font-family: inherit; font-size: .78rem;
+    .input-item-row {
+      display: grid;
+      grid-template-columns: 28px minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1fr);
+      gap: .4rem; margin-bottom: .4rem; align-items: center;
     }
-    .input-item-row input.code { font-weight: 700; color: var(--blue); }
+    .input-item-row .idx {
+      font-size: .7rem; color: var(--text3); text-align: right;
+      padding-right: .15rem; font-variant-numeric: tabular-nums;
+    }
+    .input-item-row input {
+      width: 100%; min-width: 0; box-sizing: border-box;
+      padding: .38rem .5rem;
+      background: var(--bg2); color: var(--text);
+      border: 1px solid var(--border); border-radius: 6px;
+      font-family: inherit; font-size: .82rem;
+      transition: border-color .15s;
+    }
+    .input-item-row input.port-code { font-weight: 700; color: var(--blue); letter-spacing: .5px; }
     .input-item-row input:focus { outline: none; border-color: var(--blue); }
-    .input-item-row .hint { font-size: .62rem; color: var(--text3); grid-column: 2 / 4; margin-top: -.15rem; }
     .input-grid-hd {
-      display: grid; grid-template-columns: 110px 100px 100px; gap: .35rem;
-      font-size: .65rem; color: var(--text3); padding: 0 .25rem .2rem;
-      border-bottom: 1px solid var(--border); margin-bottom: .4rem;
+      display: grid;
+      grid-template-columns: 28px minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1fr);
+      gap: .4rem;
+      font-size: .66rem; color: var(--text3); padding: 0 .15rem .3rem;
+      border-bottom: 1px solid var(--border); margin-bottom: .5rem;
+      letter-spacing: .5px;
+    }
+    .input-grid-hd span:first-child { text-align: right; }
+    /* 多列雙欄模式（股票數較多時） */
+    .input-grid.cols-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      column-gap: 1rem; row-gap: 0;
+    }
+    .input-grid-hd.cols-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      column-gap: 1rem;
+    }
+    .input-grid-hd.cols-2 > .hd-group {
+      display: grid;
+      grid-template-columns: 28px minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1fr);
+      gap: .4rem;
+    }
+    .input-grid-hd.cols-2 > .hd-group span:first-child { text-align: right; }
+    /* modal scroll 區塊（只縱向捲動） */
+    .modal-scroll {
+      max-height: 58vh; overflow-y: auto; overflow-x: hidden;
+      padding-right: .25rem; margin-bottom: .8rem;
+    }
+    @media (max-width: 640px) {
+      .input-grid.cols-2, .input-grid-hd.cols-2 { grid-template-columns: 1fr; }
     }
 
     /* ===== INSTITUTIONAL ===== */
@@ -513,9 +550,12 @@
       padding: 1.4rem;
       width: 100%;
       max-width: 460px;
-      max-height: 90vh;
+      max-height: 92vh;
       overflow-y: auto;
+      overflow-x: hidden;
+      transition: max-width .2s ease;
     }
+    .modal.wide { max-width: min(760px, 94vw); }
     .modal-hd {
       font-size: 0.95rem;
       font-weight: 700;
@@ -536,10 +576,8 @@
     .modal-hint { font-size: 0.72rem; color: var(--text2); margin-bottom: 0.9rem; }
 
     .input-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 0.55rem;
-      margin-bottom: 1rem;
+      display: block;
+      margin-bottom: 0;
     }
     .input-item { display: flex; flex-direction: column; gap: 0.2rem; }
     .input-item label { font-size: 0.7rem; color: var(--text2); }
@@ -1017,12 +1055,12 @@
       <input type="number" id="portCountInput" min="1" max="30" value="10" onchange="onPortCountChange()">
       <span style="font-size:.7rem;color:var(--text3)">（1–30，預設 10）</span>
     </div>
-    <div class="input-grid-hd">
-      <span>代號</span>
-      <span>庫存股數</span>
-      <span>平均成本</span>
+    <div id="inputGridHd" class="input-grid-hd">
+      <span>#</span><span>代號</span><span>庫存股數</span><span>平均成本</span>
     </div>
-    <div class="input-grid" id="inputGrid"><!-- rendered by JS --></div>
+    <div class="modal-scroll">
+      <div class="input-grid" id="inputGrid"><!-- rendered by JS --></div>
+    </div>
     <div class="modal-foot">
       <button class="btn-sec" onclick="closeModal()">取消</button>
       <button class="btn-prim" onclick="savePortfolio()">
@@ -3681,27 +3719,42 @@ async function fetchRecStocks() {
 }
 
 // ==================== PORTFOLIO MODAL ====================
+function _applyModalLayout() {
+  // 依股票數量切換單欄/雙欄佈局與 modal 寬度
+  const twoCol = portCount > 12;
+  const modal  = document.querySelector('#overlay .modal');
+  const grid   = id('inputGrid');
+  const hd     = id('inputGridHd');
+  if (modal) modal.classList.toggle('wide', twoCol);
+  if (grid)  grid.classList.toggle('cols-2', twoCol);
+  if (hd) {
+    hd.classList.toggle('cols-2', twoCol);
+    hd.innerHTML = twoCol
+      ? `<div class="hd-group"><span>#</span><span>代號</span><span>股數</span><span>成本</span></div>
+         <div class="hd-group"><span>#</span><span>代號</span><span>股數</span><span>成本</span></div>`
+      : `<span>#</span><span>代號</span><span>庫存股數</span><span>平均成本</span>`;
+  }
+}
+
 function _renderPortModalRows() {
+  _applyModalLayout();
   const rows = [];
   for (let i = 0; i < portCount; i++) {
     const it = portfolio[i] || _emptyPortItem();
     rows.push(`
       <div class="input-item-row" data-idx="${i}">
-        <input type="text"   class="port-code"   value="${esc(it.code || '')}" placeholder="代號 ${i+1}" maxlength="6">
-        <input type="number" class="port-shares" value="${it.shares || ''}" placeholder="股數" min="0" step="1">
-        <input type="number" class="port-cost"   value="${it.cost   || ''}" placeholder="成本價" min="0" step="0.01">
+        <span class="idx">${i+1}</span>
+        <input type="text"   class="port-code"   value="${esc(it.code || '')}" placeholder="代號" maxlength="6">
+        <input type="number" class="port-shares" value="${it.shares || ''}" placeholder="股數" min="0" step="1" inputmode="numeric">
+        <input type="number" class="port-cost"   value="${it.cost   || ''}" placeholder="成本" min="0" step="0.01" inputmode="decimal">
       </div>`);
   }
   id('inputGrid').innerHTML = rows.join('');
 }
 
 function openModal() {
-  // 數量設定列（若不存在則插入）
   const hd = id('portCountInput');
   if (hd) hd.value = portCount;
-  // 欄位列 header
-  const gridEl = id('inputGrid');
-  gridEl.innerHTML = '';
   _renderPortModalRows();
   id('overlay').classList.add('show');
 }
