@@ -289,6 +289,64 @@
     .s-price { font-size: 1.15rem; font-weight: 700; margin-top: 0.35rem; font-variant-numeric: tabular-nums; }
     .s-chg { font-size: 0.78rem; font-variant-numeric: tabular-nums; }
     .s-vol { font-size: 0.7rem; color: var(--text3); margin-top: 0.15rem; }
+    .s-pos {
+      font-size: 0.66rem; color: var(--text3);
+      margin-top: 0.3rem; padding-top: 0.25rem;
+      border-top: 1px dashed var(--border);
+      font-variant-numeric: tabular-nums;
+      line-height: 1.4;
+    }
+    .s-pos .lbl { color: var(--text3); margin-right: .25rem; }
+    .s-pnl { font-size: 0.74rem; font-weight: 600; margin-top: 0.15rem; font-variant-numeric: tabular-nums; }
+    .s-pnl.up { color: var(--up); }
+    .s-pnl.down { color: var(--down); }
+    .s-pnl.neu { color: var(--text3); }
+
+    .port-total {
+      grid-column: 1 / -1;
+      background: var(--bg2); border: 1px solid var(--border);
+      border-radius: 7px; padding: .6rem .8rem;
+      display: flex; align-items: center; justify-content: space-between;
+      font-size: .8rem; font-variant-numeric: tabular-nums;
+      margin-top: .2rem;
+    }
+    .port-total .lbl { color: var(--text2); font-weight: 600; }
+    .port-total .val { font-weight: 700; font-size: 1.02rem; }
+    .port-total .val.up   { color: var(--up); }
+    .port-total .val.down { color: var(--down); }
+    .port-total .val.neu  { color: var(--text3); }
+    .port-total .sub { font-size: .7rem; color: var(--text3); margin-left: .4rem; }
+
+    /* 編輯自選股 modal：數量 + 股數/成本欄位 */
+    .cnt-row {
+      display: flex; align-items: center; gap: .6rem;
+      margin: 0 0 .7rem;
+      padding: .5rem .6rem; background: var(--bg2);
+      border-radius: 6px; border: 1px solid var(--border);
+      font-size: .82rem;
+    }
+    .cnt-row input[type=number] {
+      width: 70px; padding: .3rem .4rem;
+      background: var(--bg3); color: var(--text);
+      border: 1px solid var(--border); border-radius: 4px;
+      font-family: inherit; font-size: .82rem;
+    }
+    .input-item-row { display: grid; grid-template-columns: 110px 100px 100px; gap: .35rem; margin-bottom: .4rem; align-items: center; }
+    .input-item-row label.idx { font-size: .72rem; color: var(--text3); text-align: right; padding-right: .25rem; }
+    .input-item-row input {
+      padding: .3rem .45rem;
+      background: var(--bg3); color: var(--text);
+      border: 1px solid var(--border); border-radius: 4px;
+      font-family: inherit; font-size: .78rem;
+    }
+    .input-item-row input.code { font-weight: 700; color: var(--blue); }
+    .input-item-row input:focus { outline: none; border-color: var(--blue); }
+    .input-item-row .hint { font-size: .62rem; color: var(--text3); grid-column: 2 / 4; margin-top: -.15rem; }
+    .input-grid-hd {
+      display: grid; grid-template-columns: 110px 100px 100px; gap: .35rem;
+      font-size: .65rem; color: var(--text3); padding: 0 .25rem .2rem;
+      border-bottom: 1px solid var(--border); margin-bottom: .4rem;
+    }
 
     /* ===== INSTITUTIONAL ===== */
     .inst-hd {
@@ -827,7 +885,7 @@
     <div class="card">
       <div class="card-hd">
         <div class="card-title">
-          <i class="fa-solid fa-briefcase"></i> 自選股（10組）
+          <i class="fa-solid fa-briefcase"></i> 自選股<span class="port-title-count">（10 組）</span>
           <i class="fa-solid fa-cloud sync-icon offline" id="syncIcon" title="未登入，使用本機儲存"></i>
         </div>
         <button class="btn-icon" id="btnOpenModal" onclick="openModal()">
@@ -953,7 +1011,17 @@
       <span><i class="fa-solid fa-pen-to-square"></i> 編輯自選股</span>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
-    <p class="modal-hint">輸入台股代碼（例：2330、6505），或留空不使用該欄位</p>
+    <p class="modal-hint">輸入台股代碼（例：2330）、庫存股數與平均成本；未填寫股數與成本者將略過損益計算</p>
+    <div class="cnt-row">
+      <label for="portCountInput"><i class="fa-solid fa-hashtag"></i> 顯示股票數</label>
+      <input type="number" id="portCountInput" min="1" max="30" value="10" onchange="onPortCountChange()">
+      <span style="font-size:.7rem;color:var(--text3)">（1–30，預設 10）</span>
+    </div>
+    <div class="input-grid-hd">
+      <span>代號</span>
+      <span>庫存股數</span>
+      <span>平均成本</span>
+    </div>
     <div class="input-grid" id="inputGrid"><!-- rendered by JS --></div>
     <div class="modal-foot">
       <button class="btn-sec" onclick="closeModal()">取消</button>
@@ -1098,7 +1166,22 @@ const TL_MAP = {
   blue:      { label:'藍燈',   desc:'景氣衰退', color:'#4488ff', bg:'rgba(68,136,255,.18)',icon:'💙' },
 };
 
+// 自選股資料模型：[{ code, shares, cost }, ...]（舊版純代號陣列會自動遷移）
 let portfolio = [];
+let portCount = 10;   // 使用者可設定顯示數量（1–30）
+const PORT_COUNT_MIN = 1;
+const PORT_COUNT_MAX = 30;
+
+function _emptyPortItem() { return { code: '', shares: 0, cost: 0 }; }
+function _normalizePortItem(v) {
+  if (!v) return _emptyPortItem();
+  if (typeof v === 'string') return { code: v.trim().toUpperCase(), shares: 0, cost: 0 };
+  return {
+    code:   String(v.code || '').trim().toUpperCase(),
+    shares: Number(v.shares) || 0,
+    cost:   Number(v.cost)   || 0,
+  };
+}
 let refreshTimer = null;
 
 // ==================== SUPABASE STATE ====================
@@ -1153,11 +1236,22 @@ async function syncFromCloud() {
       .eq('user_id', _sbUser.id)
       .maybeSingle();
     if (error) throw error;
-    if (data?.stocks?.length) {
-      portfolio = data.stocks.slice(0, 10);
-      while (portfolio.length < 10) portfolio.push('');
-      localStorage.setItem('smtm_port', JSON.stringify(portfolio));
+    const cloud = data?.stocks;
+    let cloudItems = null, cloudCount = portCount;
+    if (Array.isArray(cloud)) {
+      cloudItems = cloud.map(_normalizePortItem);
+    } else if (cloud && Array.isArray(cloud.items)) {
+      cloudItems = cloud.items.map(_normalizePortItem);
+      if (Number.isFinite(cloud.count)) cloudCount = cloud.count;
+    }
+    if (cloudItems?.length) {
+      portCount = Math.min(PORT_COUNT_MAX, Math.max(PORT_COUNT_MIN, cloudCount));
+      portfolio = cloudItems.slice(0, portCount);
+      while (portfolio.length < portCount) portfolio.push(_emptyPortItem());
+      localStorage.setItem('smtm_port', JSON.stringify({ count: portCount, items: portfolio }));
+      localStorage.setItem('smtm_port_count', String(portCount));
       sessionStorage.removeItem('smtm_port_cache');
+      _updatePortTitle();
       fetchPortfolio();
       fetchPortNews();
     }
@@ -1168,13 +1262,17 @@ async function syncFromCloud() {
   }
 }
 
-async function pushToCloud(stocks) {
+async function pushToCloud(payload) {
   if (!_sb || !_sbUser) return;
   setSyncIcon('syncing', '儲存至雲端…');
+  // 接受 { count, items } 物件或純代號陣列（向後相容）
+  const body = Array.isArray(payload)
+    ? { count: payload.length, items: payload.map(_normalizePortItem) }
+    : payload;
   try {
     const { error } = await _sb.from('portfolios').upsert({
       user_id:    _sbUser.id,
-      stocks:     stocks,
+      stocks:     body,
       updated_at: new Date().toISOString(),
     }, { onConflict: 'user_id' });
     if (error) throw error;
@@ -1421,10 +1519,33 @@ function preloadCaches() {
 }
 
 function loadPortfolio() {
-  const s = localStorage.getItem('smtm_port');
-  portfolio = s ? JSON.parse(s) : [...CFG.defaultPort];
-  while (portfolio.length < 10) portfolio.push('');
-  portfolio = portfolio.slice(0, 10);
+  let count = 10;
+  let items = null;
+  try {
+    const raw = localStorage.getItem('smtm_port');
+    if (raw) {
+      const data = JSON.parse(raw);
+      if (Array.isArray(data)) {
+        // 舊版：代號字串陣列
+        items = data.map(_normalizePortItem);
+      } else if (data && Array.isArray(data.items)) {
+        if (Number.isFinite(data.count)) count = data.count;
+        items = data.items.map(_normalizePortItem);
+      }
+    }
+  } catch (_) {}
+  if (!items) items = CFG.defaultPort.map(_normalizePortItem);
+  const savedCount = Number(localStorage.getItem('smtm_port_count'));
+  if (Number.isFinite(savedCount) && savedCount > 0) count = savedCount;
+  portCount = Math.min(PORT_COUNT_MAX, Math.max(PORT_COUNT_MIN, count));
+  portfolio = items.slice(0, portCount);
+  while (portfolio.length < portCount) portfolio.push(_emptyPortItem());
+  _updatePortTitle();
+}
+
+function _updatePortTitle() {
+  const titleEl = document.querySelector('.card-title .port-title-count');
+  if (titleEl) titleEl.textContent = `（${portCount} 組）`;
 }
 
 // ==================== CLOCK ====================
@@ -2391,30 +2512,41 @@ async function fetchTwseNames(stocks) {
 // ==================== PORTFOLIO ====================
 function _renderPortHtml() {
   const qm = {};
-  portfolio.filter(Boolean).forEach(s => {
-    qm[s] = _realtimeCache[s] || _twsePriceCache[s] || _otcPriceCache[s] || null;
+  portfolio.filter(p => p?.code).forEach(p => {
+    qm[p.code] = _realtimeCache[p.code] || _twsePriceCache[p.code] || _otcPriceCache[p.code] || null;
   });
 
-  return portfolio.map((stock, i) => {
-    if (!stock) return `
+  let totalMV   = 0; // 市值
+  let totalCost = 0; // 投入成本
+  let totalPnl  = 0; // 未實現損益
+  let hasAnyPos = false;
+
+  const cards = portfolio.map((item, i) => {
+    const code = item?.code || '';
+    if (!code) return `
       <div class="stock-card js-open-modal" title="點擊新增">
         <div class="s-code" style="color:var(--text3)">${i+1}. 未設定</div>
         <div class="s-name" style="font-size:.65rem;color:var(--text3)">點擊新增</div>
         <div class="s-price neu" style="font-size:1.2rem;margin-top:.4rem">+</div>
       </div>`;
-    const q = qm[stock];
+    const q = qm[code];
+    const shares = Number(item.shares) || 0;
+    const cost   = Number(item.cost)   || 0;
+
     if (!q) return `
       <div class="stock-card">
-        <div class="s-code">${esc(stock)}</div>
+        <div class="s-code">${esc(code)}</div>
         <div class="s-name" style="color:var(--text3);font-size:.72rem">查詢中…</div>
         <div class="s-price neu">--</div>
+        ${shares > 0 ? `<div class="s-pos"><span class="lbl">庫存</span>${fmtN(shares,0)}股 · <span class="lbl">成本</span>${fmtN(cost,2)}</div>` : ''}
       </div>`;
+
     const ch  = q.regularMarketChange || 0;
     const pct = q.regularMarketChangePercent || 0;
     const dir = ch > 0 ? 'up' : ch < 0 ? 'down' : 'neu';
     const arr = ch > 0 ? '▲' : ch < 0 ? '▼' : '─';
     const cls = ch > 0 ? 'up-card' : ch < 0 ? 'down-card' : '';
-    const cnName = _twseNameCache[stock] || (q.shortName && !/^\d/.test(q.shortName) ? q.shortName : null) || stock;
+    const cnName = _twseNameCache[code] || (q.shortName && !/^\d/.test(q.shortName) ? q.shortName : null) || code;
     let volChgHtml = '';
     if (q.volChgPct != null) {
       const vd = q.volChgPct > 0 ? 'up' : q.volChgPct < 0 ? 'down' : 'neu';
@@ -2422,20 +2554,68 @@ function _renderPortHtml() {
       volChgHtml = `<span class="${vd}" style="font-size:.62rem;margin-left:.3rem">${va}${Math.abs(q.volChgPct).toFixed(1)}%</span>`;
     }
     const rtBadge = q._realtime ? '<span style="font-size:.55rem;color:var(--blue);margin-left:.3rem">即時</span>' : '';
+
+    // 損益計算
+    let posHtml = '';
+    if (shares > 0 && cost > 0) {
+      hasAnyPos = true;
+      const price = q.regularMarketPrice || 0;
+      const mv    = price * shares;
+      const ct    = cost  * shares;
+      const pnl   = mv - ct;
+      const pnlPct = ct > 0 ? (pnl / ct * 100) : 0;
+      totalMV   += mv;
+      totalCost += ct;
+      totalPnl  += pnl;
+      const pd  = pnl > 0 ? 'up' : pnl < 0 ? 'down' : 'neu';
+      const ps  = pnl > 0 ? '+' : pnl < 0 ? '-' : '';
+      posHtml = `
+        <div class="s-pos">
+          <span class="lbl">庫存</span>${fmtN(shares,0)}股 · <span class="lbl">成本</span>${fmtN(cost,2)}
+        </div>
+        <div class="s-pnl ${pd}">
+          ${ps}${fmtN(Math.abs(pnl),0)} (${pnl>=0?'+':''}${fmtN(pnlPct,2)}%)
+        </div>`;
+    } else if (shares > 0) {
+      posHtml = `<div class="s-pos"><span class="lbl">庫存</span>${fmtN(shares,0)}股</div>`;
+    }
+
     return `
       <div class="stock-card ${cls}">
-        <div class="s-code">${esc(stock)}${rtBadge}</div>
+        <div class="s-code">${esc(code)}${rtBadge}</div>
         <div class="s-name" title="${esc(cnName)}">${esc(cnName)}</div>
         <div class="s-price ${dir}">${fmtN(q.regularMarketPrice, 2)}</div>
         <div class="s-chg ${dir}">${arr} ${Math.abs(ch).toFixed(2)} (${pct>0?'+':''}${pct.toFixed(2)}%)</div>
         <div class="s-vol">量 ${fmtVol(q.regularMarketVolume)}${volChgHtml}</div>
+        ${posHtml}
       </div>`;
   }).join('');
+
+  // 總計列
+  let totalHtml = '';
+  if (hasAnyPos) {
+    const pd  = totalPnl > 0 ? 'up' : totalPnl < 0 ? 'down' : 'neu';
+    const ps  = totalPnl > 0 ? '+' : totalPnl < 0 ? '-' : '';
+    const pct = totalCost > 0 ? (totalPnl / totalCost * 100) : 0;
+    totalHtml = `
+      <div class="port-total">
+        <div>
+          <span class="lbl">總損益</span>
+          <span class="sub">市值 ${fmtN(totalMV,0)} · 成本 ${fmtN(totalCost,0)}</span>
+        </div>
+        <div class="val ${pd}">
+          ${ps}${fmtN(Math.abs(totalPnl),0)}
+          <span class="sub">(${totalPnl>=0?'+':''}${fmtN(pct,2)}%)</span>
+        </div>
+      </div>`;
+  }
+
+  return cards + totalHtml;
 }
 
 async function fetchPortfolio() {
   const el = id('portGrid');
-  const valid = portfolio.filter(Boolean);
+  const valid = portfolio.filter(p => p?.code).map(p => p.code);
   if (!valid.length) {
     setHtml(el, '<p style="grid-column:1/-1;text-align:center;color:var(--text3);padding:1.5rem;font-size:.78rem">點擊「編輯」新增自選股</p>');
     return;
@@ -2525,7 +2705,7 @@ async function _fetchGNews(query, count = 5, useBak = false) {
 
 async function fetchPortNews() {
   const el = id('portNews');
-  const valid = portfolio.filter(Boolean);
+  const valid = portfolio.filter(p => p?.code).map(p => p.code);
 
   if (!valid.length) {
     setHtml(el, '<p style="text-align:center;color:var(--text3);font-size:.78rem;padding:1rem">請先設定自選股</p>');
@@ -3414,13 +3594,52 @@ async function fetchRecStocks() {
 }
 
 // ==================== PORTFOLIO MODAL ====================
+function _renderPortModalRows() {
+  const rows = [];
+  for (let i = 0; i < portCount; i++) {
+    const it = portfolio[i] || _emptyPortItem();
+    rows.push(`
+      <div class="input-item-row" data-idx="${i}">
+        <input type="text"   class="port-code"   value="${esc(it.code || '')}" placeholder="代號 ${i+1}" maxlength="6">
+        <input type="number" class="port-shares" value="${it.shares || ''}" placeholder="股數" min="0" step="1">
+        <input type="number" class="port-cost"   value="${it.cost   || ''}" placeholder="成本價" min="0" step="0.01">
+      </div>`);
+  }
+  id('inputGrid').innerHTML = rows.join('');
+}
+
 function openModal() {
-  id('inputGrid').innerHTML = portfolio.map((s, i) => `
-    <div class="input-item">
-      <label>股票 ${i+1}</label>
-      <input type="text" class="port-input" value="${esc(s||'')}" placeholder="如：2330" maxlength="6">
-    </div>`).join('');
+  // 數量設定列（若不存在則插入）
+  const hd = id('portCountInput');
+  if (hd) hd.value = portCount;
+  // 欄位列 header
+  const gridEl = id('inputGrid');
+  gridEl.innerHTML = '';
+  _renderPortModalRows();
   id('overlay').classList.add('show');
+}
+
+function onPortCountChange() {
+  const el = id('portCountInput');
+  let n = parseInt(el.value, 10);
+  if (!Number.isFinite(n)) n = 10;
+  n = Math.min(PORT_COUNT_MAX, Math.max(PORT_COUNT_MIN, n));
+  el.value = n;
+  // 先收集目前 modal 的輸入，再重繪
+  const current = _collectModalItems();
+  portCount = n;
+  portfolio = current.slice(0, n);
+  while (portfolio.length < n) portfolio.push(_emptyPortItem());
+  _renderPortModalRows();
+}
+
+function _collectModalItems() {
+  const rows = Array.from(document.querySelectorAll('#inputGrid .input-item-row'));
+  return rows.map(r => ({
+    code:   (r.querySelector('.port-code').value || '').trim().toUpperCase(),
+    shares: Number(r.querySelector('.port-shares').value) || 0,
+    cost:   Number(r.querySelector('.port-cost').value)   || 0,
+  }));
 }
 
 function closeModal() {
@@ -3428,13 +3647,23 @@ function closeModal() {
 }
 
 function savePortfolio() {
-  portfolio = Array.from(document.querySelectorAll('.port-input'))
-    .map(inp => inp.value.trim().toUpperCase());
-  localStorage.setItem('smtm_port', JSON.stringify(portfolio));
+  const items = _collectModalItems();
+  const cntEl = id('portCountInput');
+  if (cntEl) {
+    let n = parseInt(cntEl.value, 10);
+    if (Number.isFinite(n)) portCount = Math.min(PORT_COUNT_MAX, Math.max(PORT_COUNT_MIN, n));
+  }
+  portfolio = items.slice(0, portCount);
+  while (portfolio.length < portCount) portfolio.push(_emptyPortItem());
+
+  localStorage.setItem('smtm_port', JSON.stringify({ count: portCount, items: portfolio }));
+  localStorage.setItem('smtm_port_count', String(portCount));
+  sessionStorage.removeItem('smtm_port_cache');
+  _updatePortTitle();
   closeModal();
   fetchPortfolio();
   fetchPortNews();
-  if (_sbUser) pushToCloud(portfolio); // 若已登入，同步至雲端
+  if (_sbUser) pushToCloud({ count: portCount, items: portfolio });
 }
 
 function bindModalEvents() {
