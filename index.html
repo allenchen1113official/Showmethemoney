@@ -1237,14 +1237,28 @@ async function syncFromCloud() {
       .maybeSingle();
     if (error) throw error;
     const cloud = data?.stocks;
-    let cloudItems = null, cloudCount = portCount;
+    let cloudItems = null, cloudCount = portCount, cloudHasShares = false;
     if (Array.isArray(cloud)) {
       cloudItems = cloud.map(_normalizePortItem);
     } else if (cloud && Array.isArray(cloud.items)) {
       cloudItems = cloud.items.map(_normalizePortItem);
+      cloudHasShares = cloud.items.some(it =>
+        it && typeof it === 'object' && (Number(it.shares) > 0 || Number(it.cost) > 0));
       if (Number.isFinite(cloud.count)) cloudCount = cloud.count;
     }
     if (cloudItems?.length) {
+      // 若雲端為舊格式（無 shares/cost）或全為 0：以本地已儲存的庫存/成本為準，
+      // 避免「儲存後被雲端舊資料覆蓋」
+      if (!cloudHasShares) {
+        const localByCode = {};
+        portfolio.forEach(p => { if (p?.code) localByCode[p.code] = p; });
+        cloudItems = cloudItems.map(it => {
+          const loc = localByCode[it.code];
+          return loc && (loc.shares > 0 || loc.cost > 0)
+            ? { ...it, shares: loc.shares || 0, cost: loc.cost || 0 }
+            : it;
+        });
+      }
       portCount = Math.min(PORT_COUNT_MAX, Math.max(PORT_COUNT_MIN, cloudCount));
       portfolio = cloudItems.slice(0, portCount);
       while (portfolio.length < portCount) portfolio.push(_emptyPortItem());
@@ -1254,6 +1268,8 @@ async function syncFromCloud() {
       _updatePortTitle();
       fetchPortfolio();
       fetchPortNews();
+      // 若雲端為舊格式，立即回寫新格式避免下次再被覆蓋
+      if (!cloudHasShares) pushToCloud({ count: portCount, items: portfolio });
     }
     setSyncIcon('synced', `已同步：${_sbUser.email}`);
   } catch (e) {
