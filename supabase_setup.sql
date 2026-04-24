@@ -39,6 +39,11 @@ begin
     return;  -- 已是目標型別
   end if;
 
+  -- 舊欄位可能帶有與 jsonb 不相容的 DEFAULT（例如 '{}'::text[]），
+  -- 先移除 DEFAULT 以避免 42804「default cannot be cast automatically」錯誤，
+  -- 轉型完成後會在最後重新設定新的 jsonb DEFAULT。
+  alter table public.portfolios alter column stocks drop default;
+
   if col_type = 'ARRAY' then
     -- 如 text[]、varchar[]：PostgreSQL 不允許 USING 子句含 subquery，
     -- 因此建立 helper function 包住 unnest + jsonb_agg 的聚合邏輯，
@@ -78,6 +83,10 @@ begin
       alter column stocks type jsonb using (stocks::text)::jsonb;
   end if;
 end$$;
+
+-- 2b. 補回 jsonb 格式的 DEFAULT（前面為了轉型安全已 DROP 掉舊 default）
+alter table public.portfolios
+  alter column stocks set default '{"count":10,"items":[],"sort":"mcap"}'::jsonb;
 
 -- 3. 啟用 Row Level Security
 alter table public.portfolios enable row level security;
