@@ -1446,23 +1446,40 @@ async function pushToCloud(payload) {
     : payload;
   const nowIso = new Date().toISOString();
   try {
-    const { data, error } = await _sb.from('portfolios').upsert({
+    // 步驟 1：單純 upsert（不鏈 .select），避免 RLS 對 SELECT 的限制或
+    //         PostgREST 回傳處理差異造成誤判為失敗
+    const { error: upErr } = await _sb.from('portfolios').upsert({
       user_id:    _sbUser.id,
       stocks:     body,
       updated_at: nowIso,
-    }, { onConflict: 'user_id' }).select('stocks, updated_at').maybeSingle();
-    if (error) throw error;
-    // 驗證雲端確實收到預期的筆數
-    const savedCount = data?.stocks?.items?.length ?? body.items?.length ?? 0;
-    console.info('[Supabase push] saved', savedCount, 'items to cloud', { updated_at: data?.updated_at });
-    localStorage.setItem('smtm_port_updated_at', String(new Date(data?.updated_at || nowIso).getTime()));
+    }, { onConflict: 'user_id' });
+    if (upErr) throw upErr;
+
+    // 步驟 2：試著讀回驗證（失敗不影響儲存結果）
+    let savedCount = body.items?.length ?? 0;
+    let serverTs   = nowIso;
+    try {
+      const { data: verifyData, error: verifyErr } = await _sb
+        .from('portfolios')
+        .select('stocks, updated_at')
+        .eq('user_id', _sbUser.id)
+        .maybeSingle();
+      if (!verifyErr && verifyData) {
+        savedCount = verifyData?.stocks?.items?.length ?? savedCount;
+        serverTs   = verifyData?.updated_at || nowIso;
+      }
+    } catch (_) { /* 驗證失敗不影響儲存結果 */ }
+
+    console.info('[Supabase push] saved', savedCount, 'items', { updated_at: serverTs });
+    localStorage.setItem('smtm_port_updated_at', String(new Date(serverTs).getTime()));
     setSyncIcon('synced', `已同步：${_sbUser.email}（雲端 ${savedCount} 檔）`);
     return { ok: true, savedCount };
   } catch (e) {
-    console.error('[Supabase push]', e);
-    setSyncIcon('sync-err', '雲端儲存失敗：' + e.message);
-    if (typeof _showToast === 'function') _showToast('雲端儲存失敗：' + e.message, 'err');
-    return { ok: false, reason: e.message };
+    const msg = e?.message || e?.error_description || JSON.stringify(e);
+    console.error('[Supabase push] failed', e);
+    setSyncIcon('sync-err', '雲端儲存失敗：' + msg);
+    if (typeof _showToast === 'function') _showToast('雲端儲存失敗：' + msg, 'err');
+    return { ok: false, reason: msg };
   }
 }
 
