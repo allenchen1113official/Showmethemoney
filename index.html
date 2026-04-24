@@ -376,6 +376,43 @@
       gap: .4rem;
     }
     .input-grid-hd.cols-2 > .hd-group span:first-child { text-align: right; }
+    /* 拖曳排序樣式 */
+    .input-item-row.drag-on { cursor: grab; }
+    .input-item-row.drag-on:active { cursor: grabbing; }
+    .input-item-row.drag-on input { cursor: text; }
+    .input-item-row.dragging { opacity: .4; }
+    .input-item-row.drag-over-top    { box-shadow: 0 -2px 0 var(--blue) inset; }
+    .input-item-row.drag-over-bottom { box-shadow: 0 2px 0 var(--blue) inset; }
+    .input-item-row .idx { user-select: none; }
+    .input-item-row.drag-on .idx::before {
+      content: '\2630'; margin-right: .15rem;
+      color: var(--text3); font-size: .7rem;
+    }
+    /* Toast 通知 */
+    .smtm-toast {
+      position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(10px);
+      background: var(--bg3); color: var(--text);
+      border: 1px solid var(--border); border-radius: 8px;
+      padding: .55rem .95rem; font-size: .82rem;
+      box-shadow: 0 8px 24px rgba(0,0,0,.35);
+      opacity: 0; pointer-events: none; z-index: 9999;
+      transition: opacity .25s ease, transform .25s ease;
+    }
+    .smtm-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    .smtm-toast[data-type=ok]  { border-color: var(--up); }
+    .smtm-toast[data-type=err] { border-color: var(--down); }
+
+    /* 排序切換列 */
+    .sort-row {
+      display: flex; align-items: center; gap: .5rem;
+      margin: 0 0 .7rem; padding: .45rem .6rem;
+      background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+      font-size: .78rem;
+    }
+    .sort-row label { display: flex; align-items: center; gap: .4rem; cursor: pointer; }
+    .sort-row input[type=checkbox] { cursor: pointer; }
+    .sort-row .hint { font-size: .68rem; color: var(--text3); margin-left: auto; }
+
     /* modal scroll 區塊（只縱向捲動） */
     .modal-scroll {
       max-height: 58vh; overflow-y: auto; overflow-x: hidden;
@@ -1055,6 +1092,13 @@
       <input type="number" id="portCountInput" min="1" max="30" value="10" onchange="onPortCountChange()">
       <span style="font-size:.7rem;color:var(--text3)">（1–30，預設 10）</span>
     </div>
+    <div class="sort-row">
+      <label>
+        <input type="checkbox" id="portSortMCap" onchange="onPortSortChange()">
+        <span><i class="fa-solid fa-arrow-down-wide-short"></i> 依市值排序（預設）</span>
+      </label>
+      <span class="hint" id="sortHint">取消勾選可拖曳調整順序</span>
+    </div>
     <div id="inputGridHd" class="input-grid-hd">
       <span>#</span><span>代號</span><span>庫存股數</span><span>平均成本</span>
     </div>
@@ -1210,6 +1254,35 @@ let portCount = 10;   // 使用者可設定顯示數量（1–30）
 const PORT_COUNT_MIN = 1;
 const PORT_COUNT_MAX = 30;
 
+// 排序模式：'mcap' 依市值由大到小（預設）/ 'manual' 使用者拖曳順序
+const PORT_SORT_KEY = 'smtm_port_sort';
+let portSort = (localStorage.getItem(PORT_SORT_KEY) === 'manual') ? 'manual' : 'mcap';
+
+function _priceOf(code) {
+  if (!code) return 0;
+  const q = (typeof _realtimeCache !== 'undefined' && _realtimeCache[code])
+         || (typeof _twsePriceCache !== 'undefined' && _twsePriceCache[code])
+         || (typeof _otcPriceCache  !== 'undefined' && _otcPriceCache[code])
+         || null;
+  return q ? (q.regularMarketPrice || 0) : 0;
+}
+function _mvOf(item) {
+  return _priceOf(item?.code) * (Number(item?.shares) || 0);
+}
+function _displayPortfolio(arr) {
+  const base = arr || portfolio;
+  if (portSort !== 'mcap') return base;
+  const copy = base.slice();
+  copy.sort((a, b) => {
+    const ma = _mvOf(a), mb = _mvOf(b);
+    if (mb !== ma) return mb - ma;
+    // 無市值者依是否有代號排序，空格墊底
+    const ha = a?.code ? 1 : 0, hb = b?.code ? 1 : 0;
+    return hb - ha;
+  });
+  return copy;
+}
+
 function _emptyPortItem() { return { code: '', shares: 0, cost: 0 }; }
 function _normalizePortItem(v) {
   if (!v) return _emptyPortItem();
@@ -1283,6 +1356,10 @@ async function syncFromCloud() {
       cloudHasShares = cloud.items.some(it =>
         it && typeof it === 'object' && (Number(it.shares) > 0 || Number(it.cost) > 0));
       if (Number.isFinite(cloud.count)) cloudCount = cloud.count;
+      if (cloud.sort === 'manual' || cloud.sort === 'mcap') {
+        portSort = cloud.sort;
+        localStorage.setItem(PORT_SORT_KEY, portSort);
+      }
     }
     if (cloudItems?.length) {
       // 若雲端為舊格式（無 shares/cost）或全為 0：以本地已儲存的庫存/成本為準，
@@ -1585,6 +1662,7 @@ function loadPortfolio() {
       } else if (data && Array.isArray(data.items)) {
         if (Number.isFinite(data.count)) count = data.count;
         items = data.items.map(_normalizePortItem);
+        if (data.sort === 'manual' || data.sort === 'mcap') portSort = data.sort;
       }
     }
   } catch (_) {}
@@ -2575,7 +2653,8 @@ function _renderPortHtml() {
   let totalPnl  = 0; // 未實現損益
   let hasAnyPos = false;
 
-  const cards = portfolio.map((item, i) => {
+  const displayList = _displayPortfolio();
+  const cards = displayList.map((item, i) => {
     const code = item?.code || '';
     if (!code) return `
       <div class="stock-card js-open-modal" title="點擊新增">
@@ -3738,23 +3817,118 @@ function _applyModalLayout() {
 
 function _renderPortModalRows() {
   _applyModalLayout();
+  const manual = (portSort === 'manual');
+  // modal 顯示順序：mcap 模式顯示排序後結果（唯讀順序）；manual 模式顯示儲存順序（可拖曳）
+  const list = manual ? portfolio.slice() : _displayPortfolio();
+  while (list.length < portCount) list.push(_emptyPortItem());
   const rows = [];
   for (let i = 0; i < portCount; i++) {
-    const it = portfolio[i] || _emptyPortItem();
+    const it = list[i] || _emptyPortItem();
+    const dragAttrs = manual ? 'draggable="true"' : '';
+    const dragCls   = manual ? ' drag-on' : '';
     rows.push(`
-      <div class="input-item-row" data-idx="${i}">
+      <div class="input-item-row${dragCls}" data-idx="${i}" ${dragAttrs}>
         <span class="idx">${i+1}</span>
         <input type="text"   class="port-code"   value="${esc(it.code || '')}" placeholder="代號" maxlength="6">
         <input type="number" class="port-shares" value="${it.shares || ''}" placeholder="股數" min="0" step="1" inputmode="numeric">
         <input type="number" class="port-cost"   value="${it.cost   || ''}" placeholder="成本" min="0" step="0.01" inputmode="decimal">
       </div>`);
   }
-  id('inputGrid').innerHTML = rows.join('');
+  const grid = id('inputGrid');
+  grid.innerHTML = rows.join('');
+  // 依模式綁定 / 解除拖曳
+  _bindDragHandlers(manual);
+}
+
+// ---- 拖曳排序 ----
+let _dragSrcIdx = null;
+function _bindDragHandlers(enable) {
+  const grid = id('inputGrid');
+  if (!grid) return;
+  grid.querySelectorAll('.input-item-row').forEach(row => {
+    row.ondragstart = enable ? _onDragStart : null;
+    row.ondragover  = enable ? _onDragOver  : null;
+    row.ondragleave = enable ? _onDragLeave : null;
+    row.ondrop      = enable ? _onDrop      : null;
+    row.ondragend   = enable ? _onDragEnd   : null;
+  });
+}
+function _onDragStart(e) {
+  const row = e.currentTarget;
+  // 若從 input 內發動，忽略（讓使用者正常選字）
+  if (e.target && e.target.tagName === 'INPUT') { e.preventDefault(); return; }
+  _dragSrcIdx = Number(row.dataset.idx);
+  try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', String(_dragSrcIdx)); } catch(_){}
+  row.classList.add('dragging');
+}
+function _onDragOver(e) {
+  e.preventDefault();
+  const row = e.currentTarget;
+  const rect = row.getBoundingClientRect();
+  const before = (e.clientY - rect.top) < rect.height / 2;
+  row.classList.remove('drag-over-top', 'drag-over-bottom');
+  row.classList.add(before ? 'drag-over-top' : 'drag-over-bottom');
+  try { e.dataTransfer.dropEffect = 'move'; } catch(_){}
+}
+function _onDragLeave(e) {
+  e.currentTarget.classList.remove('drag-over-top', 'drag-over-bottom');
+}
+function _onDrop(e) {
+  e.preventDefault();
+  const row = e.currentTarget;
+  const rect = row.getBoundingClientRect();
+  const before = (e.clientY - rect.top) < rect.height / 2;
+  row.classList.remove('drag-over-top', 'drag-over-bottom');
+  const tgt = Number(row.dataset.idx);
+  const src = _dragSrcIdx;
+  if (src == null || src === tgt) return;
+  // 先保留 modal 內目前值，依當前顯示順序插入到目標位置
+  const current = _collectModalItems();
+  const [moved] = current.splice(src, 1);
+  let insertAt = tgt > src ? tgt - 1 : tgt;
+  if (!before) insertAt += 1;
+  insertAt = Math.max(0, Math.min(current.length, insertAt));
+  current.splice(insertAt, 0, moved);
+  portfolio = current;
+  while (portfolio.length < portCount) portfolio.push(_emptyPortItem());
+  _renderPortModalRows();
+}
+function _onDragEnd() {
+  _dragSrcIdx = null;
+  document.querySelectorAll('#inputGrid .input-item-row')
+    .forEach(el => el.classList.remove('dragging', 'drag-over-top', 'drag-over-bottom'));
+}
+
+function onPortSortChange() {
+  const cb = id('portSortMCap');
+  const mcap = !!(cb && cb.checked);
+  // 切換前先保留使用者當前輸入
+  const current = _collectModalItems();
+  if (current.length) {
+    portfolio = current;
+    while (portfolio.length < portCount) portfolio.push(_emptyPortItem());
+  }
+  portSort = mcap ? 'mcap' : 'manual';
+  localStorage.setItem(PORT_SORT_KEY, portSort);
+  const hint = id('sortHint');
+  if (hint) hint.textContent = mcap ? '取消勾選可拖曳調整順序' : '拖曳列可調整顯示順序';
+  _renderPortModalRows();
+  // 主列表同步重繪
+  const el = id('portGrid');
+  if (el) {
+    const html = _renderPortHtml();
+    setHtml(el, html);
+    sessionStorage.setItem('smtm_port_cache', html);
+  }
 }
 
 function openModal() {
   const hd = id('portCountInput');
   if (hd) hd.value = portCount;
+  const sb = id('portSortMCap');
+  if (sb) sb.checked = (portSort === 'mcap');
+  const hint = id('sortHint');
+  if (hint) hint.textContent = (portSort === 'mcap') ? '取消勾選可拖曳調整順序' : '拖曳列可調整顯示順序';
   _renderPortModalRows();
   id('overlay').classList.add('show');
 }
@@ -3765,7 +3939,7 @@ function onPortCountChange() {
   if (!Number.isFinite(n)) n = 10;
   n = Math.min(PORT_COUNT_MAX, Math.max(PORT_COUNT_MIN, n));
   el.value = n;
-  // 先收集目前 modal 的輸入，再重繪
+  // 先收集目前 modal 的輸入，再重繪（保留已填資料）
   const current = _collectModalItems();
   portCount = n;
   portfolio = current.slice(0, n);
@@ -3775,35 +3949,71 @@ function onPortCountChange() {
 
 function _collectModalItems() {
   const rows = Array.from(document.querySelectorAll('#inputGrid .input-item-row'));
-  return rows.map(r => ({
-    code:   (r.querySelector('.port-code').value || '').trim().toUpperCase(),
-    shares: Number(r.querySelector('.port-shares').value) || 0,
-    cost:   Number(r.querySelector('.port-cost').value)   || 0,
-  }));
+  return rows.map(r => {
+    const codeEl   = r.querySelector('.port-code');
+    const sharesEl = r.querySelector('.port-shares');
+    const costEl   = r.querySelector('.port-cost');
+    return {
+      code:   ((codeEl   && codeEl.value)   || '').trim().toUpperCase(),
+      shares: Number(sharesEl && sharesEl.value) || 0,
+      cost:   Number(costEl   && costEl.value)   || 0,
+    };
+  });
 }
 
 function closeModal() {
   id('overlay').classList.remove('show');
 }
 
-function savePortfolio() {
-  const items = _collectModalItems();
-  const cntEl = id('portCountInput');
-  if (cntEl) {
-    let n = parseInt(cntEl.value, 10);
-    if (Number.isFinite(n)) portCount = Math.min(PORT_COUNT_MAX, Math.max(PORT_COUNT_MIN, n));
+function _showToast(msg, type = 'info') {
+  let t = id('smtmToast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'smtmToast';
+    t.className = 'smtm-toast';
+    document.body.appendChild(t);
   }
-  portfolio = items.slice(0, portCount);
-  while (portfolio.length < portCount) portfolio.push(_emptyPortItem());
+  t.textContent = msg;
+  t.dataset.type = type;
+  t.classList.add('show');
+  clearTimeout(_showToast._tm);
+  _showToast._tm = setTimeout(() => t.classList.remove('show'), 2400);
+}
 
-  localStorage.setItem('smtm_port', JSON.stringify({ count: portCount, items: portfolio }));
-  localStorage.setItem('smtm_port_count', String(portCount));
-  sessionStorage.removeItem('smtm_port_cache');
-  _updatePortTitle();
-  closeModal();
-  fetchPortfolio();
-  fetchPortNews();
-  if (_sbUser) pushToCloud({ count: portCount, items: portfolio });
+function savePortfolio() {
+  try {
+    // 1. 先用使用者輸入數量決定 portCount（避免收集/切片不一致）
+    const cntEl = id('portCountInput');
+    if (cntEl) {
+      let n = parseInt(cntEl.value, 10);
+      if (Number.isFinite(n)) portCount = Math.min(PORT_COUNT_MAX, Math.max(PORT_COUNT_MIN, n));
+    }
+    // 2. 收集目前 modal 所有輸入列
+    const items = _collectModalItems();
+    // 3. modal 列數可能與 portCount 不同（極少數時序），以 DOM 為準再 slice
+    const effective = Math.max(portCount, items.length);
+    portCount = Math.min(PORT_COUNT_MAX, Math.max(PORT_COUNT_MIN, effective));
+    portfolio = items.slice(0, portCount);
+    while (portfolio.length < portCount) portfolio.push(_emptyPortItem());
+
+    // 4. 寫入本地
+    localStorage.setItem('smtm_port', JSON.stringify({
+      count: portCount, items: portfolio, sort: portSort
+    }));
+    localStorage.setItem('smtm_port_count', String(portCount));
+    localStorage.setItem(PORT_SORT_KEY, portSort);
+    sessionStorage.removeItem('smtm_port_cache');
+
+    _updatePortTitle();
+    closeModal();
+    fetchPortfolio();
+    fetchPortNews();
+    if (_sbUser) pushToCloud({ count: portCount, items: portfolio, sort: portSort });
+    _showToast(`已儲存 ${portCount} 檔自選股`, 'ok');
+  } catch (e) {
+    console.error('[savePortfolio]', e);
+    _showToast('儲存失敗：' + (e?.message || e), 'err');
+  }
 }
 
 function bindModalEvents() {
