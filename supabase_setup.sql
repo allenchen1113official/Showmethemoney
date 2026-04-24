@@ -40,23 +40,34 @@ begin
   end if;
 
   if col_type = 'ARRAY' then
-    -- 如 text[]、varchar[]：用 to_jsonb() 轉成 JSON 陣列，
-    -- 再封裝成新格式 { count, items: [{code,shares,cost}, ...], sort }
-    alter table public.portfolios
-      alter column stocks type jsonb
-      using jsonb_build_object(
-        'count', coalesce(array_length(stocks, 1), 0),
+    -- 如 text[]、varchar[]：PostgreSQL 不允許 USING 子句含 subquery，
+    -- 因此建立 helper function 包住 unnest + jsonb_agg 的聚合邏輯，
+    -- 再在 USING 中呼叫該 function；轉型完成後即可 DROP 掉。
+    create or replace function public._smtm_stocks_arr_to_jsonb(arr text[])
+      returns jsonb
+      language sql
+      immutable
+    as $f$
+      select jsonb_build_object(
+        'count', coalesce(array_length(arr, 1), 0),
         'items', coalesce(
           (
             select jsonb_agg(
                      jsonb_build_object('code', x, 'shares', 0, 'cost', 0)
                    )
-              from unnest(stocks) as x
+              from unnest(arr) as x
           ),
           '[]'::jsonb
         ),
         'sort', 'mcap'
       );
+    $f$;
+
+    alter table public.portfolios
+      alter column stocks type jsonb
+      using public._smtm_stocks_arr_to_jsonb(stocks);
+
+    drop function if exists public._smtm_stocks_arr_to_jsonb(text[]);
   elsif col_type in ('text', 'character varying', 'character') then
     -- 字串欄位（可能存 JSON 字串）：直接 parse
     alter table public.portfolios
