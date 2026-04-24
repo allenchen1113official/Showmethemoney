@@ -17,15 +17,54 @@ create table if not exists public.portfolios (
 );
 
 -- 2. 確保欄位型別正確（若舊表欄位不符，轉成 jsonb）
+--    舊版本可能是 text[]（單純代號陣列），需改用 to_jsonb() 才能正確轉型；
+--    text / varchar 則用 ::jsonb 解析；其他型別則先轉 text 再 parse。
 do $$
+declare
+  col_type text;
+  col_udt  text;
 begin
-  if exists (
-    select 1 from information_schema.columns
-    where table_schema = 'public' and table_name = 'portfolios'
-      and column_name = 'stocks' and data_type <> 'jsonb'
-  ) then
+  select data_type, udt_name
+    into col_type, col_udt
+    from information_schema.columns
+   where table_schema = 'public'
+     and table_name   = 'portfolios'
+     and column_name  = 'stocks';
+
+  if col_type is null then
+    return;  -- 欄位不存在，略過
+  end if;
+
+  if col_type = 'jsonb' then
+    return;  -- 已是目標型別
+  end if;
+
+  if col_type = 'ARRAY' then
+    -- 如 text[]、varchar[]：用 to_jsonb() 轉成 JSON 陣列，
+    -- 再封裝成新格式 { count, items: [{code,shares,cost}, ...], sort }
+    alter table public.portfolios
+      alter column stocks type jsonb
+      using jsonb_build_object(
+        'count', coalesce(array_length(stocks, 1), 0),
+        'items', coalesce(
+          (
+            select jsonb_agg(
+                     jsonb_build_object('code', x, 'shares', 0, 'cost', 0)
+                   )
+              from unnest(stocks) as x
+          ),
+          '[]'::jsonb
+        ),
+        'sort', 'mcap'
+      );
+  elsif col_type in ('text', 'character varying', 'character') then
+    -- 字串欄位（可能存 JSON 字串）：直接 parse
     alter table public.portfolios
       alter column stocks type jsonb using stocks::jsonb;
+  else
+    -- 其他型別：先轉 text 再 parse（保底）
+    alter table public.portfolios
+      alter column stocks type jsonb using (stocks::text)::jsonb;
   end if;
 end$$;
 
