@@ -1393,6 +1393,27 @@ function setupAuthListener() {
     if (_event === 'SIGNED_IN')  syncFromCloud();
     if (_event === 'SIGNED_OUT') setSyncIcon('offline', '未登入，使用本機儲存');
   });
+  // 頁面重新可見時（切換 tab / 解鎖手機回來）：重新從雲端拉資料，
+  // 讓跨裝置修改可以互看到最新狀態
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && _sbUser) {
+      syncFromCloud();
+    }
+  });
+  // 視窗重新取得焦點時也觸發（覆蓋 tab 切換的各種情境）
+  window.addEventListener('focus', () => {
+    if (_sbUser) syncFromCloud();
+  });
+}
+
+// 確保當下 _sbUser 是最新的（在需要用到時呼叫）
+async function _ensureUser() {
+  if (_sbUser || !_sb) return _sbUser;
+  try {
+    const { data } = await _sb.auth.getSession();
+    _sbUser = data?.session?.user ?? null;
+  } catch (_) {}
+  return _sbUser;
 }
 
 // ==================== SYNC HELPERS ====================
@@ -1430,15 +1451,22 @@ async function syncFromCloud() {
         localStorage.setItem(PORT_SORT_KEY, portSort);
       }
     }
-    // 本地資料是否比雲端新、或含更多有效代號 → 不要被雲端覆蓋，直接推上雲
-    const localCodeCount  = portfolio.filter(p => p?.code).length;
-    const cloudCodeCount  = (cloudItems || []).filter(p => p?.code).length;
-    const localIsNewer    = localUpdatedAt > cloudUpdatedAt;
-    const localHasMoreData = portCount > cloudCount || localCodeCount > cloudCodeCount;
-    if ((localIsNewer || localHasMoreData) && localCodeCount > 0) {
-      console.info('[syncFromCloud] 本地資料較新/較完整 → 改推上雲端', {
-        localCount: portCount, cloudCount,
-        localCodes: localCodeCount, cloudCodes: cloudCodeCount,
+    // 衝突解決：以 updated_at 時間戳為準（避免另一裝置的新修改被本機舊資料覆蓋）
+    //   - cloud 有資料且時間戳較新 → 下載雲端
+    //   - cloud 無資料、或 本機較新 → 推上雲端
+    //   - 兩邊一樣新 → 兩邊一致，不動作
+    const localCodeCount = portfolio.filter(p => p?.code).length;
+    const cloudCodeCount = (cloudItems || []).filter(p => p?.code).length;
+    const cloudEmpty     = !cloudItems || cloudCodeCount === 0;
+    const localIsNewer   = localUpdatedAt > cloudUpdatedAt + 1500; // 1.5s 容忍誤差
+    if (cloudEmpty && localCodeCount > 0) {
+      console.info('[syncFromCloud] 雲端無資料，推上本機', { localCodes: localCodeCount });
+      await pushToCloud({ count: portCount, items: portfolio, sort: portSort });
+      setSyncIcon('synced', `已同步：${_sbUser.email}（推上雲端 ${portCount} 檔）`);
+      return;
+    }
+    if (localIsNewer && localCodeCount > 0) {
+      console.info('[syncFromCloud] 本地時間戳較新 → 推上雲端', {
         localTs: localUpdatedAt, cloudTs: cloudUpdatedAt,
       });
       await pushToCloud({ count: portCount, items: portfolio, sort: portSort });
@@ -1482,7 +1510,10 @@ async function syncFromCloud() {
 }
 
 async function pushToCloud(payload) {
-  if (!_sb || !_sbUser) return { ok: false, reason: 'not-signed-in' };
+  if (!_sb) return { ok: false, reason: 'no-client' };
+  // 若 _sbUser 暫時為 null（session 仍在背景 restore），主動再取一次
+  if (!_sbUser) await _ensureUser();
+  if (!_sbUser) return { ok: false, reason: 'not-signed-in' };
   setSyncIcon('syncing', '儲存至雲端…');
   // 接受 { count, items } 物件或純代號陣列（向後相容）
   const body = Array.isArray(payload)
@@ -4151,7 +4182,11 @@ function onPortSortChange() {
   }
 }
 
-function openModal() {
+async function openModal() {
+  // 開啟編輯前先從雲端拉最新資料，確保不會在舊快照上編輯後覆蓋另一裝置的修改
+  if (_sb && _sbUser) {
+    try { await syncFromCloud(); } catch (_) {}
+  }
   const hd = id('portCountInput');
   if (hd) hd.value = portCount;
   const sb = id('portSortMCap');
@@ -4273,10 +4308,14 @@ function savePortfolio() {
     fetchPortfolio();
     fetchPortNews();
     _showToast(`已儲存 ${portCount} 檔自選股`, 'ok');
-    if (_sbUser) {
+    // 推送至雲端：即使 _sbUser 當下為 null，pushToCloud 內部會再次 getSession
+    if (_sb) {
       pushToCloud({ count: portCount, items: portfolio, sort: portSort })
         .then(r => {
           if (r?.ok) _showToast(`已同步雲端（${r.savedCount} 檔）`, 'ok');
+          else if (r?.reason === 'not-signed-in') {
+            console.info('[savePortfolio] 未登入，跳過雲端同步');
+          }
         });
     }
   } catch (e) {
