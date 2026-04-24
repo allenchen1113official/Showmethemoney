@@ -333,7 +333,7 @@
     }
     .input-item-row {
       display: grid;
-      grid-template-columns: 28px minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1fr);
+      grid-template-columns: 28px minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1fr) 30px;
       gap: .4rem; margin-bottom: .4rem; align-items: center;
     }
     .input-item-row .idx {
@@ -350,9 +350,29 @@
     }
     .input-item-row input.port-code { font-weight: 700; color: var(--blue); letter-spacing: .5px; }
     .input-item-row input:focus { outline: none; border-color: var(--blue); }
+    .input-item-row input:not(:placeholder-shown) { border-color: var(--border); background: var(--bg3); }
+    .input-item-row input.touched { border-color: var(--blue); }
+    .row-del {
+      background: transparent; color: var(--text3);
+      border: 1px solid transparent; border-radius: 6px;
+      width: 26px; height: 26px; padding: 0; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: .78rem; transition: all .15s;
+    }
+    .row-del:hover { color: var(--down); border-color: var(--down); background: rgba(231,76,60,.08); }
+    .row-add-btn {
+      width: 100%; margin-top: .35rem;
+      padding: .5rem; background: transparent; color: var(--text2);
+      border: 1px dashed var(--border); border-radius: 6px;
+      cursor: pointer; font-size: .78rem;
+      display: inline-flex; align-items: center; justify-content: center; gap: .4rem;
+      transition: all .15s;
+    }
+    .row-add-btn:hover:not(:disabled) { border-color: var(--blue); color: var(--blue); background: rgba(52,152,219,.05); }
+    .row-add-btn:disabled { opacity: .4; cursor: not-allowed; }
     .input-grid-hd {
       display: grid;
-      grid-template-columns: 28px minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1fr);
+      grid-template-columns: 28px minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1fr) 30px;
       gap: .4rem;
       font-size: .66rem; color: var(--text3); padding: 0 .15rem .3rem;
       border-bottom: 1px solid var(--border); margin-bottom: .5rem;
@@ -372,7 +392,7 @@
     }
     .input-grid-hd.cols-2 > .hd-group {
       display: grid;
-      grid-template-columns: 28px minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1fr);
+      grid-template-columns: 28px minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1fr) 30px;
       gap: .4rem;
     }
     .input-grid-hd.cols-2 > .hd-group span:first-child { text-align: right; }
@@ -1104,6 +1124,9 @@
     </div>
     <div class="modal-scroll">
       <div class="input-grid" id="inputGrid"><!-- rendered by JS --></div>
+      <button type="button" class="row-add-btn" id="addRowBtn" onclick="addPortRow()">
+        <i class="fa-solid fa-plus"></i> 新增一列
+      </button>
     </div>
     <div class="modal-foot">
       <button class="btn-sec" onclick="closeModal()">取消</button>
@@ -3809,9 +3832,15 @@ function _applyModalLayout() {
   if (hd) {
     hd.classList.toggle('cols-2', twoCol);
     hd.innerHTML = twoCol
-      ? `<div class="hd-group"><span>#</span><span>代號</span><span>股數</span><span>成本</span></div>
-         <div class="hd-group"><span>#</span><span>代號</span><span>股數</span><span>成本</span></div>`
-      : `<span>#</span><span>代號</span><span>庫存股數</span><span>平均成本</span>`;
+      ? `<div class="hd-group"><span>#</span><span>代號</span><span>股數</span><span>成本</span><span></span></div>
+         <div class="hd-group"><span>#</span><span>代號</span><span>股數</span><span>成本</span><span></span></div>`
+      : `<span>#</span><span>代號</span><span>庫存股數</span><span>平均成本</span><span></span>`;
+  }
+  // 新增列按鈕狀態
+  const addBtn = id('addRowBtn');
+  if (addBtn) {
+    addBtn.disabled = portCount >= PORT_COUNT_MAX;
+    addBtn.title = addBtn.disabled ? `已達上限 ${PORT_COUNT_MAX}` : '新增一列';
   }
 }
 
@@ -3826,12 +3855,14 @@ function _renderPortModalRows() {
     const it = list[i] || _emptyPortItem();
     const dragAttrs = manual ? 'draggable="true"' : '';
     const dragCls   = manual ? ' drag-on' : '';
+    const hasData = !!(it.code || it.shares || it.cost);
     rows.push(`
       <div class="input-item-row${dragCls}" data-idx="${i}" ${dragAttrs}>
         <span class="idx">${i+1}</span>
         <input type="text"   class="port-code"   value="${esc(it.code || '')}" placeholder="代號" maxlength="6">
         <input type="number" class="port-shares" value="${it.shares || ''}" placeholder="股數" min="0" step="1" inputmode="numeric">
         <input type="number" class="port-cost"   value="${it.cost   || ''}" placeholder="成本" min="0" step="0.01" inputmode="decimal">
+        <button type="button" class="row-del" title="${hasData ? '刪除此列' : '清空此列'}" onclick="deletePortRow(${i})"><i class="fa-solid fa-trash-can"></i></button>
       </div>`);
   }
   const grid = id('inputGrid');
@@ -3931,6 +3962,39 @@ function openModal() {
   if (hint) hint.textContent = (portSort === 'mcap') ? '取消勾選可拖曳調整順序' : '拖曳列可調整顯示順序';
   _renderPortModalRows();
   id('overlay').classList.add('show');
+}
+
+function deletePortRow(displayIdx) {
+  // 依目前 modal 內容重建 portfolio，再刪掉指定顯示 index 的那筆
+  const current = _collectModalItems();
+  if (displayIdx < 0 || displayIdx >= current.length) return;
+  current.splice(displayIdx, 1);
+  // portCount 隨之 -1（至少留 1 列）
+  portCount = Math.max(PORT_COUNT_MIN, portCount - 1);
+  const cntEl = id('portCountInput');
+  if (cntEl) cntEl.value = portCount;
+  portfolio = current.slice(0, portCount);
+  while (portfolio.length < portCount) portfolio.push(_emptyPortItem());
+  _renderPortModalRows();
+}
+
+function addPortRow() {
+  if (portCount >= PORT_COUNT_MAX) return;
+  // 保留目前輸入
+  const current = _collectModalItems();
+  portCount += 1;
+  const cntEl = id('portCountInput');
+  if (cntEl) cntEl.value = portCount;
+  portfolio = current.slice(0, portCount);
+  while (portfolio.length < portCount) portfolio.push(_emptyPortItem());
+  _renderPortModalRows();
+  // 聚焦到新列
+  setTimeout(() => {
+    const rows = document.querySelectorAll('#inputGrid .input-item-row');
+    const last = rows[rows.length - 1];
+    const input = last && last.querySelector('.port-code');
+    if (input) input.focus();
+  }, 10);
 }
 
 function onPortCountChange() {
