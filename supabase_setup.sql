@@ -1,12 +1,14 @@
 -- ============================================================
--- Show Me The Money — Supabase 自選股儲存設定腳本
+-- Show Me The Money — Supabase 自選股儲存設定腳本（簡化版）
 -- 使用方式：
 --   1. 至 Supabase Dashboard → SQL Editor
 --   2. 新建 query，貼上整份內容後按「Run」
 --   3. 執行結果應看到「Success. No rows returned」
 --   4. 回到看盤頁，登入帳號 → 編輯自選股 → 儲存
 -- ------------------------------------------------------------
--- 本腳本為 idempotent（可重複執行）：重跑不會刪除既有資料。
+-- 本腳本會保留 user_id，並將舊的 stocks（text[]）代號搬到新的
+-- jsonb 結構中；舊的 shares / cost 無法保留（舊資料沒有）。
+-- idempotent：可重複執行。
 -- ============================================================
 
 -- 1. 建立 portfolios 資料表（若不存在）
@@ -16,10 +18,9 @@ create table if not exists public.portfolios (
   updated_at timestamptz not null default now()
 );
 
--- 2. 確保 stocks 欄位為 jsonb 型別（舊版本可能是 text[]）
---    策略：不用 ALTER COLUMN ... TYPE（容易踩 default cast / subquery 等限制），
---          改採「備份成 text → DROP 舊欄位 → ADD 新 jsonb 欄位 → 從備份重建 → 清備份」。
---    idempotent：已經是 jsonb 時，只補回正確的 DEFAULT / NOT NULL。
+-- 2. 把 stocks 欄位型別改成 jsonb（採用方案 B：保留舊代號）
+--    作法：新增 stocks_new jsonb 欄位 → 搬資料 → DROP 舊 stocks → RENAME
+--    idempotent：stocks 已是 jsonb 時整段略過。
 do $$
 declare
   col_type text;
@@ -34,80 +35,49 @@ begin
 
   raise notice '[smtm] stocks 欄位目前 data_type=%  udt_name=%', col_type, col_udt;
 
-  if col_type is null then
-    raise notice '[smtm] stocks 欄位不存在，add 成 jsonb';
-    alter table public.portfolios
-      add column stocks jsonb not null
-      default '{"count":10,"items":[],"sort":"mcap"}'::jsonb;
-    return;
-  end if;
-
   if col_type = 'jsonb' then
-    raise notice '[smtm] stocks 已是 jsonb，只確認 default / not null';
-    alter table public.portfolios alter column stocks drop default;
-    alter table public.portfolios
-      alter column stocks set default '{"count":10,"items":[],"sort":"mcap"}'::jsonb;
-    alter table public.portfolios alter column stocks set not null;
+    raise notice '[smtm] stocks 已是 jsonb，跳過重建';
     return;
   end if;
 
-  -- 非 jsonb：完整重建
-  raise notice '[smtm] 將 stocks 從 % 重建為 jsonb', col_type;
-
-  -- 2.1 備份舊值為純 text（PostgreSQL 陣列會序列化成 "{a,b,c}" 格式）
-  alter table public.portfolios add column if not exists _stocks_bak text;
-  update public.portfolios set _stocks_bak = stocks::text;
-
-  -- 2.2 drop 舊欄位（同時清掉連動的 default / constraint）
-  alter table public.portfolios drop column stocks;
-
-  -- 2.3 add 新 jsonb 欄位（先 nullable，以便後續 update；最後再 set not null）
+  -- 2.1 建立新欄位（帶 jsonb default）
   alter table public.portfolios
-    add column stocks jsonb
+    add column if not exists stocks_new jsonb
     default '{"count":10,"items":[],"sort":"mcap"}'::jsonb;
 
-  -- 2.4 依舊型別把備份還原成 jsonb
+  -- 2.2 把舊代號搬到 stocks_new
   if col_type = 'ARRAY' then
-    -- 例如 text[]：備份值形如 {2330,2317,2454}
-    update public.portfolios
-      set stocks = jsonb_build_object(
-        'count',
-          coalesce(
-            array_length(
-              string_to_array(nullif(trim(both '{}' from _stocks_bak), ''), ','),
-              1
-            ),
-            0
-          ),
-        'items',
-          coalesce(
-            (
-              select jsonb_agg(
-                       jsonb_build_object(
-                         'code',  trim(both '"' from x),
-                         'shares', 0,
-                         'cost',   0
-                       )
-                     )
-                from unnest(
-                  string_to_array(nullif(trim(both '{}' from _stocks_bak), ''), ',')
-                ) as x
-              where trim(both '"' from x) <> ''
-            ),
-            '[]'::jsonb
-          ),
-        'sort', 'mcap'
-      )
-      where _stocks_bak is not null and _stocks_bak <> '';
+    -- 舊欄位為 text[] / varchar[]：unnest 產生 items 陣列
+    update public.portfolios p
+       set stocks_new = jsonb_build_object(
+             'count', coalesce(array_length(p.stocks, 1), 0),
+             'items', coalesce((
+               select jsonb_agg(
+                        jsonb_build_object(
+                          'code',   x::text,
+                          'shares', 0,
+                          'cost',   0
+                        )
+                      )
+                 from unnest(p.stocks) as x
+                where x is not null and x::text <> ''
+             ), '[]'::jsonb),
+             'sort', 'mcap'
+           )
+     where p.stocks is not null;
   elsif col_type in ('text', 'character varying', 'character') then
-    -- 可能是 JSON 字串：直接 parse
-    update public.portfolios
-      set stocks = _stocks_bak::jsonb
-      where _stocks_bak is not null and _stocks_bak <> '';
+    -- 舊欄位為字串：可能存 JSON 字串，直接 parse
+    update public.portfolios p
+       set stocks_new = p.stocks::jsonb
+     where p.stocks is not null
+       and p.stocks <> '';
   end if;
 
-  -- 2.5 清掉備份欄位、補上 not null
-  alter table public.portfolios drop column _stocks_bak;
+  -- 2.3 刪掉舊欄位、新欄位改名成 stocks
+  alter table public.portfolios drop column stocks;
+  alter table public.portfolios rename column stocks_new to stocks;
+
+  -- 2.4 補 not null 約束（上一步的 default 會讓 null 列填入預設值）
   update public.portfolios set stocks = '{"count":10,"items":[],"sort":"mcap"}'::jsonb
     where stocks is null;
   alter table public.portfolios alter column stocks set not null;
@@ -160,9 +130,9 @@ create trigger trg_portfolios_touch_updated_at
   before update on public.portfolios
   for each row execute function public.tg_portfolios_touch_updated_at();
 
--- 7. 驗證：查詢目前的 policies（應看到 4 筆）
--- select policyname, cmd from pg_policies where tablename = 'portfolios';
-
--- 8. 驗證：查詢自己的資料列（登入後執行）
--- select user_id, jsonb_array_length(stocks->'items') as item_count, updated_at
+-- 7. 驗證（執行完後可選擇性單獨跑以下查詢）
+-- select column_name, data_type from information_schema.columns
+--   where table_schema='public' and table_name='portfolios';
+-- select policyname, cmd from pg_policies where tablename='portfolios';
+-- select user_id, jsonb_array_length(stocks->'items') as items, updated_at
 --   from public.portfolios where user_id = auth.uid();
