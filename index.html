@@ -1086,7 +1086,7 @@
           <div class="rec-crit-hd"><i class="fa-solid fa-filter"></i> 篩選條件</div>
           <ul class="rec-crit-list">
             <li>均線多頭排列（年線＜半年線＜季線＜收盤）</li>
-            <li>外資＋投信近 3 日合計淨買超</li>
+            <li>外資「連 3 日」買超 且 投信「連 3 日」買超</li>
             <li>大戶持股週增 ≥3%（以量增作代理指標）</li>
             <li>近 4 季有 3 季營益率＞10%</li>
             <li>近 4 季有 3 季營收年增＞20%</li>
@@ -3505,7 +3505,7 @@ async function fetchFinanceNews() {
 // 資料來源：Goodinfo!（行情 + 基本面分析）、Yahoo Finance（均線/量能）、TWSE T86（法人）
 // 篩選目標：
 //   (1) 均線多頭排列（年線<半年線<季線<收盤）
-//   (2) 外資+投信近 3 日合計淨買超（TWSE T86）
+//   (2) 外資「連 3 日」買超 且 投信「連 3 日」買超（TWSE T86）
 //   (3) 大戶持股增加（以量增 & Goodinfo 本益比位階作綜合指標）
 //   (4~6) 近 4 季有 3 季：營益率>10%、營收年增>20%、EPS 年增>10%
 // 評分制 → 預設取 Top 5；每交易日存入歷史紀錄 smtm_rec_hist
@@ -3562,6 +3562,7 @@ async function _fetchT86(yyyymmdd) {
 }
 
 async function _get3DayT86() {
+  // map[code] = { foreign: [d1,d2,d3], trust: [d1,d2,d3] }（d1 最新）
   const out = {};
   let days = 0;
   const today = new Date();
@@ -3582,7 +3583,9 @@ async function _get3DayT86() {
       // T86 欄位：[code, name, 外陸資買, 賣, 買賣超, 外資自營買, 賣, 買賣超, 投信買, 賣, 買賣超, 自營商買賣超 ...]
       const foreign = toNum(row[4]);
       const trust   = toNum(row[10]);
-      out[code] = (out[code] || 0) + foreign + trust;
+      if (!out[code]) out[code] = { foreign: [], trust: [] };
+      out[code].foreign.push(foreign);
+      out[code].trust.push(trust);
     });
     days++;
   }
@@ -3707,7 +3710,7 @@ function _renderRecPicks(entry, dateKey) {
   const html = entry.picks.map((s, idx) => {
     const tags = [];
     if (s.bullish)            tags.push('<span class="rec-tag pos">多頭排列</span>');
-    if (s.netBuy)             tags.push('<span class="rec-tag pos">法人 3 日買超</span>');
+    if (s.netBuy)             tags.push('<span class="rec-tag pos">外資＋投信 連3日買超</span>');
     if (s.volUp)              tags.push('<span class="rec-tag">量增 ≥3%</span>');
     if (s.tags?.marg)         tags.push('<span class="rec-tag">營益率＞10%</span>');
     if (s.tags?.rev)          tags.push('<span class="rec-tag">營收年增＞20%</span>');
@@ -3799,7 +3802,14 @@ async function _computeRecPicks() {
       if (r20 > 0) volUp = (r3 / r20 - 1) >= 0.03;
     }
 
-    const netBuy = (t86.map[s.code] || 0) > 0;
+    // 外資「連 3 日」買超 且 投信「連 3 日」買超
+    const rec = t86.map[s.code];
+    const fArr = rec?.foreign || [];
+    const tArr = rec?.trust   || [];
+    const need = Math.min(3, t86.days || 0);
+    const foreignStreak = need >= 3 && fArr.length >= 3 && fArr.slice(0, 3).every(v => v > 0);
+    const trustStreak   = need >= 3 && tArr.length >= 3 && tArr.slice(0, 3).every(v => v > 0);
+    const netBuy = foreignStreak && trustStreak;
     const prev   = h[h.length - 2]?.c;
     const chg    = (close && prev) ? (close / prev - 1) * 100 : 0;
 
