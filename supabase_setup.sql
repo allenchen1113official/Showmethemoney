@@ -16,9 +16,10 @@ create table if not exists public.portfolios (
   updated_at timestamptz not null default now()
 );
 
--- 2. 確保欄位型別正確（若舊表欄位不符，轉成 jsonb）
---    舊版本可能是 text[]（單純代號陣列），需改用 to_jsonb() 才能正確轉型；
---    text / varchar 則用 ::jsonb 解析；其他型別則先轉 text 再 parse。
+-- 2. 確保 stocks 欄位為 jsonb 型別（舊版本可能是 text[]）
+--    策略：不用 ALTER COLUMN ... TYPE（容易踩 default cast / subquery 等限制），
+--          改採「備份成 text → DROP 舊欄位 → ADD 新 jsonb 欄位 → 從備份重建 → 清備份」。
+--    idempotent：已經是 jsonb 時，只補回正確的 DEFAULT / NOT NULL。
 do $$
 declare
   col_type text;
@@ -31,62 +32,86 @@ begin
      and table_name   = 'portfolios'
      and column_name  = 'stocks';
 
+  raise notice '[smtm] stocks 欄位目前 data_type=%  udt_name=%', col_type, col_udt;
+
   if col_type is null then
-    return;  -- 欄位不存在，略過
+    raise notice '[smtm] stocks 欄位不存在，add 成 jsonb';
+    alter table public.portfolios
+      add column stocks jsonb not null
+      default '{"count":10,"items":[],"sort":"mcap"}'::jsonb;
+    return;
   end if;
 
   if col_type = 'jsonb' then
-    return;  -- 已是目標型別
+    raise notice '[smtm] stocks 已是 jsonb，只確認 default / not null';
+    alter table public.portfolios alter column stocks drop default;
+    alter table public.portfolios
+      alter column stocks set default '{"count":10,"items":[],"sort":"mcap"}'::jsonb;
+    alter table public.portfolios alter column stocks set not null;
+    return;
   end if;
 
-  -- 舊欄位可能帶有與 jsonb 不相容的 DEFAULT（例如 '{}'::text[]），
-  -- 先移除 DEFAULT 以避免 42804「default cannot be cast automatically」錯誤，
-  -- 轉型完成後會在最後重新設定新的 jsonb DEFAULT。
-  alter table public.portfolios alter column stocks drop default;
+  -- 非 jsonb：完整重建
+  raise notice '[smtm] 將 stocks 從 % 重建為 jsonb', col_type;
 
+  -- 2.1 備份舊值為純 text（PostgreSQL 陣列會序列化成 "{a,b,c}" 格式）
+  alter table public.portfolios add column if not exists _stocks_bak text;
+  update public.portfolios set _stocks_bak = stocks::text;
+
+  -- 2.2 drop 舊欄位（同時清掉連動的 default / constraint）
+  alter table public.portfolios drop column stocks;
+
+  -- 2.3 add 新 jsonb 欄位（先 nullable，以便後續 update；最後再 set not null）
+  alter table public.portfolios
+    add column stocks jsonb
+    default '{"count":10,"items":[],"sort":"mcap"}'::jsonb;
+
+  -- 2.4 依舊型別把備份還原成 jsonb
   if col_type = 'ARRAY' then
-    -- 如 text[]、varchar[]：PostgreSQL 不允許 USING 子句含 subquery，
-    -- 因此建立 helper function 包住 unnest + jsonb_agg 的聚合邏輯，
-    -- 再在 USING 中呼叫該 function；轉型完成後即可 DROP 掉。
-    create or replace function public._smtm_stocks_arr_to_jsonb(arr text[])
-      returns jsonb
-      language sql
-      immutable
-    as $f$
-      select jsonb_build_object(
-        'count', coalesce(array_length(arr, 1), 0),
-        'items', coalesce(
-          (
-            select jsonb_agg(
-                     jsonb_build_object('code', x, 'shares', 0, 'cost', 0)
-                   )
-              from unnest(arr) as x
+    -- 例如 text[]：備份值形如 {2330,2317,2454}
+    update public.portfolios
+      set stocks = jsonb_build_object(
+        'count',
+          coalesce(
+            array_length(
+              string_to_array(nullif(trim(both '{}' from _stocks_bak), ''), ','),
+              1
+            ),
+            0
           ),
-          '[]'::jsonb
-        ),
+        'items',
+          coalesce(
+            (
+              select jsonb_agg(
+                       jsonb_build_object(
+                         'code',  trim(both '"' from x),
+                         'shares', 0,
+                         'cost',   0
+                       )
+                     )
+                from unnest(
+                  string_to_array(nullif(trim(both '{}' from _stocks_bak), ''), ',')
+                ) as x
+              where trim(both '"' from x) <> ''
+            ),
+            '[]'::jsonb
+          ),
         'sort', 'mcap'
-      );
-    $f$;
-
-    alter table public.portfolios
-      alter column stocks type jsonb
-      using public._smtm_stocks_arr_to_jsonb(stocks);
-
-    drop function if exists public._smtm_stocks_arr_to_jsonb(text[]);
+      )
+      where _stocks_bak is not null and _stocks_bak <> '';
   elsif col_type in ('text', 'character varying', 'character') then
-    -- 字串欄位（可能存 JSON 字串）：直接 parse
-    alter table public.portfolios
-      alter column stocks type jsonb using stocks::jsonb;
-  else
-    -- 其他型別：先轉 text 再 parse（保底）
-    alter table public.portfolios
-      alter column stocks type jsonb using (stocks::text)::jsonb;
+    -- 可能是 JSON 字串：直接 parse
+    update public.portfolios
+      set stocks = _stocks_bak::jsonb
+      where _stocks_bak is not null and _stocks_bak <> '';
   end if;
-end$$;
 
--- 2b. 補回 jsonb 格式的 DEFAULT（前面為了轉型安全已 DROP 掉舊 default）
-alter table public.portfolios
-  alter column stocks set default '{"count":10,"items":[],"sort":"mcap"}'::jsonb;
+  -- 2.5 清掉備份欄位、補上 not null
+  alter table public.portfolios drop column _stocks_bak;
+  update public.portfolios set stocks = '{"count":10,"items":[],"sort":"mcap"}'::jsonb
+    where stocks is null;
+  alter table public.portfolios alter column stocks set not null;
+end$$;
 
 -- 3. 啟用 Row Level Security
 alter table public.portfolios enable row level security;
