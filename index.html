@@ -1366,11 +1366,13 @@ async function syncFromCloud() {
   try {
     const { data, error } = await _sb
       .from('portfolios')
-      .select('stocks')
+      .select('stocks, updated_at')
       .eq('user_id', _sbUser.id)
       .maybeSingle();
     if (error) throw error;
     const cloud = data?.stocks;
+    const cloudUpdatedAt = data?.updated_at ? new Date(data.updated_at).getTime() : 0;
+    const localUpdatedAt = Number(localStorage.getItem('smtm_port_updated_at')) || 0;
     let cloudItems = null, cloudCount = portCount, cloudHasShares = false;
     if (Array.isArray(cloud)) {
       cloudItems = cloud.map(_normalizePortItem);
@@ -1383,6 +1385,21 @@ async function syncFromCloud() {
         portSort = cloud.sort;
         localStorage.setItem(PORT_SORT_KEY, portSort);
       }
+    }
+    // 本地資料是否比雲端新、或含更多有效代號 → 不要被雲端覆蓋，直接推上雲
+    const localCodeCount  = portfolio.filter(p => p?.code).length;
+    const cloudCodeCount  = (cloudItems || []).filter(p => p?.code).length;
+    const localIsNewer    = localUpdatedAt > cloudUpdatedAt;
+    const localHasMoreData = portCount > cloudCount || localCodeCount > cloudCodeCount;
+    if ((localIsNewer || localHasMoreData) && localCodeCount > 0) {
+      console.info('[syncFromCloud] 本地資料較新/較完整 → 改推上雲端', {
+        localCount: portCount, cloudCount,
+        localCodes: localCodeCount, cloudCodes: cloudCodeCount,
+        localTs: localUpdatedAt, cloudTs: cloudUpdatedAt,
+      });
+      await pushToCloud({ count: portCount, items: portfolio, sort: portSort });
+      setSyncIcon('synced', `已同步：${_sbUser.email}（推上雲端 ${portCount} 檔）`);
+      return;
     }
     if (cloudItems?.length) {
       // 若雲端為舊格式（無 shares/cost）或全為 0：以本地已儲存的庫存/成本為準，
@@ -1397,11 +1414,15 @@ async function syncFromCloud() {
             : it;
         });
       }
-      portCount = Math.min(PORT_COUNT_MAX, Math.max(PORT_COUNT_MIN, cloudCount));
+      // 關鍵修正：使用 max(cloudCount, cloudItems.length) 作為 portCount
+      // 避免 cloudCount 舊值（如 10）把實際 17 筆資料截成 10 筆
+      const effectiveCount = Math.max(cloudCount, cloudItems.length);
+      portCount = Math.min(PORT_COUNT_MAX, Math.max(PORT_COUNT_MIN, effectiveCount));
       portfolio = cloudItems.slice(0, portCount);
       while (portfolio.length < portCount) portfolio.push(_emptyPortItem());
-      localStorage.setItem('smtm_port', JSON.stringify({ count: portCount, items: portfolio }));
+      localStorage.setItem('smtm_port', JSON.stringify({ count: portCount, items: portfolio, sort: portSort }));
       localStorage.setItem('smtm_port_count', String(portCount));
+      if (cloudUpdatedAt) localStorage.setItem('smtm_port_updated_at', String(cloudUpdatedAt));
       sessionStorage.removeItem('smtm_port_cache');
       _updatePortTitle();
       fetchPortfolio();
@@ -1417,23 +1438,31 @@ async function syncFromCloud() {
 }
 
 async function pushToCloud(payload) {
-  if (!_sb || !_sbUser) return;
+  if (!_sb || !_sbUser) return { ok: false, reason: 'not-signed-in' };
   setSyncIcon('syncing', '儲存至雲端…');
   // 接受 { count, items } 物件或純代號陣列（向後相容）
   const body = Array.isArray(payload)
-    ? { count: payload.length, items: payload.map(_normalizePortItem) }
+    ? { count: payload.length, items: payload.map(_normalizePortItem), sort: portSort }
     : payload;
+  const nowIso = new Date().toISOString();
   try {
-    const { error } = await _sb.from('portfolios').upsert({
+    const { data, error } = await _sb.from('portfolios').upsert({
       user_id:    _sbUser.id,
       stocks:     body,
-      updated_at: new Date().toISOString(),
-    }, { onConflict: 'user_id' });
+      updated_at: nowIso,
+    }, { onConflict: 'user_id' }).select('stocks, updated_at').maybeSingle();
     if (error) throw error;
-    setSyncIcon('synced', `已同步：${_sbUser.email}`);
+    // 驗證雲端確實收到預期的筆數
+    const savedCount = data?.stocks?.items?.length ?? body.items?.length ?? 0;
+    console.info('[Supabase push] saved', savedCount, 'items to cloud', { updated_at: data?.updated_at });
+    localStorage.setItem('smtm_port_updated_at', String(new Date(data?.updated_at || nowIso).getTime()));
+    setSyncIcon('synced', `已同步：${_sbUser.email}（雲端 ${savedCount} 檔）`);
+    return { ok: true, savedCount };
   } catch (e) {
     console.error('[Supabase push]', e);
     setSyncIcon('sync-err', '雲端儲存失敗：' + e.message);
+    if (typeof _showToast === 'function') _showToast('雲端儲存失敗：' + e.message, 'err');
+    return { ok: false, reason: e.message };
   }
 }
 
@@ -4061,19 +4090,26 @@ function savePortfolio() {
     while (portfolio.length < portCount) portfolio.push(_emptyPortItem());
 
     // 4. 寫入本地
+    const nowMs = Date.now();
     localStorage.setItem('smtm_port', JSON.stringify({
       count: portCount, items: portfolio, sort: portSort
     }));
     localStorage.setItem('smtm_port_count', String(portCount));
     localStorage.setItem(PORT_SORT_KEY, portSort);
+    localStorage.setItem('smtm_port_updated_at', String(nowMs));
     sessionStorage.removeItem('smtm_port_cache');
 
     _updatePortTitle();
     closeModal();
     fetchPortfolio();
     fetchPortNews();
-    if (_sbUser) pushToCloud({ count: portCount, items: portfolio, sort: portSort });
     _showToast(`已儲存 ${portCount} 檔自選股`, 'ok');
+    if (_sbUser) {
+      pushToCloud({ count: portCount, items: portfolio, sort: portSort })
+        .then(r => {
+          if (r?.ok) _showToast(`已同步雲端（${r.savedCount} 檔）`, 'ok');
+        });
+    }
   } catch (e) {
     console.error('[savePortfolio]', e);
     _showToast('儲存失敗：' + (e?.message || e), 'err');
