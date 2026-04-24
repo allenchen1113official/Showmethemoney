@@ -397,16 +397,57 @@
     }
     .input-grid-hd.cols-2 > .hd-group span:first-child { text-align: right; }
     /* 拖曳排序樣式 */
-    .input-item-row.drag-on { cursor: grab; }
-    .input-item-row.drag-on:active { cursor: grabbing; }
-    .input-item-row.drag-on input { cursor: text; }
-    .input-item-row.dragging { opacity: .4; }
-    .input-item-row.drag-over-top    { box-shadow: 0 -2px 0 var(--blue) inset; }
-    .input-item-row.drag-over-bottom { box-shadow: 0 2px 0 var(--blue) inset; }
+    .input-item-row { position: relative; }
     .input-item-row .idx { user-select: none; }
-    .input-item-row.drag-on .idx::before {
-      content: '\2630'; margin-right: .15rem;
-      color: var(--text3); font-size: .7rem;
+    .input-item-row .drag-handle {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 22px; height: 24px; margin-right: 2px;
+      color: var(--text3); cursor: grab;
+      border-radius: 4px; transition: all .15s;
+      touch-action: none; user-select: none;
+    }
+    .input-item-row .drag-handle:hover {
+      color: var(--blue); background: rgba(52,152,219,.12);
+    }
+    .input-item-row .drag-handle:active { cursor: grabbing; }
+    .input-item-row .drag-handle i { pointer-events: none; }
+    .input-item-row.dragging { opacity: .35; }
+    /* 明確的插入線指示 */
+    .input-item-row.drop-above::before,
+    .input-item-row.drop-below::after {
+      content: ''; position: absolute; left: 0; right: 0;
+      height: 3px; background: var(--blue); border-radius: 2px;
+      box-shadow: 0 0 6px rgba(52,152,219,.5);
+      pointer-events: none; z-index: 2;
+    }
+    .input-item-row.drop-above::before { top: -3px; }
+    .input-item-row.drop-below::after  { bottom: -3px; }
+    .input-item-row.drag-on { background: transparent; transition: background .15s; }
+    .input-item-row.drag-on:hover { background: rgba(52,152,219,.04); border-radius: 4px; }
+    /* 升降按鈕（行動裝置友善 / 鍵盤替代方案） */
+    .row-move {
+      background: transparent; color: var(--text3);
+      border: 1px solid transparent; border-radius: 4px;
+      width: 20px; height: 20px; padding: 0; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: .62rem; transition: all .15s;
+    }
+    .row-move:hover:not(:disabled) { color: var(--blue); background: rgba(52,152,219,.1); }
+    .row-move:disabled { opacity: .3; cursor: not-allowed; }
+    .row-move-group { display: inline-flex; flex-direction: column; gap: 1px; }
+    /* 操作說明 banner */
+    .drag-hint-banner {
+      font-size: .68rem; color: var(--blue);
+      background: rgba(52,152,219,.08);
+      border-left: 3px solid var(--blue);
+      padding: .4rem .6rem; margin: 0 0 .5rem;
+      border-radius: 3px;
+    }
+    .drag-hint-banner .kbd {
+      display: inline-block; padding: 0 .3rem;
+      background: var(--bg3); border: 1px solid var(--border);
+      border-radius: 3px; font-size: .6rem; margin: 0 .15rem;
+      font-family: monospace; color: var(--text2);
     }
     /* Toast 通知 */
     .smtm-toast {
@@ -1121,6 +1162,9 @@
     </div>
     <div id="inputGridHd" class="input-grid-hd">
       <span>#</span><span>代號</span><span>庫存股數</span><span>平均成本</span>
+    </div>
+    <div class="drag-hint-banner" id="dragHintBanner" style="display:none">
+      <i class="fa-solid fa-circle-info"></i> 拖曳列前方的 <i class="fa-solid fa-grip-vertical"></i> 圖示可調整顯示順序
     </div>
     <div class="modal-scroll">
       <div class="input-grid" id="inputGrid"><!-- rendered by JS --></div>
@@ -3888,6 +3932,9 @@ function _applyModalLayout() {
     addBtn.disabled = portCount >= PORT_COUNT_MAX;
     addBtn.title = addBtn.disabled ? `已達上限 ${PORT_COUNT_MAX}` : '新增一列';
   }
+  // 拖曳提示 banner：僅在 manual 模式顯示
+  const banner = id('dragHintBanner');
+  if (banner) banner.style.display = (portSort === 'manual') ? '' : 'none';
 }
 
 function _renderPortModalRows() {
@@ -3902,9 +3949,12 @@ function _renderPortModalRows() {
     const dragAttrs = manual ? 'draggable="true"' : '';
     const dragCls   = manual ? ' drag-on' : '';
     const hasData = !!(it.code || it.shares || it.cost);
+    const idxCell = manual
+      ? `<span class="idx"><span class="drag-handle" draggable="true" title="按住拖曳調整順序"><i class="fa-solid fa-grip-vertical"></i></span></span>`
+      : `<span class="idx">${i+1}</span>`;
     rows.push(`
-      <div class="input-item-row${dragCls}" data-idx="${i}" ${dragAttrs}>
-        <span class="idx">${i+1}</span>
+      <div class="input-item-row${dragCls}" data-idx="${i}">
+        ${idxCell}
         <input type="text"   class="port-code"   value="${esc(it.code || '')}" placeholder="代號" maxlength="6">
         <input type="number" class="port-shares" value="${it.shares || ''}" placeholder="股數" min="0" step="1" inputmode="numeric">
         <input type="number" class="port-cost"   value="${it.cost   || ''}" placeholder="成本" min="0" step="0.01" inputmode="decimal">
@@ -3919,48 +3969,145 @@ function _renderPortModalRows() {
 
 // ---- 拖曳排序 ----
 let _dragSrcIdx = null;
+let _dragSrcRow = null;
 function _bindDragHandlers(enable) {
   const grid = id('inputGrid');
   if (!grid) return;
   grid.querySelectorAll('.input-item-row').forEach(row => {
-    row.ondragstart = enable ? _onDragStart : null;
+    // row 本身負責 drop/over/leave
     row.ondragover  = enable ? _onDragOver  : null;
     row.ondragleave = enable ? _onDragLeave : null;
     row.ondrop      = enable ? _onDrop      : null;
     row.ondragend   = enable ? _onDragEnd   : null;
+    // 僅 handle 可發動拖曳（避免誤觸 input）
+    const handle = row.querySelector('.drag-handle');
+    if (handle) {
+      handle.ondragstart   = enable ? _onDragStart   : null;
+      // 觸控裝置：HTML5 drag 不支援 → 使用 pointer events
+      handle.onpointerdown = enable ? _onPointerDown : null;
+    }
   });
 }
-function _onDragStart(e) {
-  const row = e.currentTarget;
-  // 若從 input 內發動，忽略（讓使用者正常選字）
-  if (e.target && e.target.tagName === 'INPUT') { e.preventDefault(); return; }
-  _dragSrcIdx = Number(row.dataset.idx);
-  try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', String(_dragSrcIdx)); } catch(_){}
-  row.classList.add('dragging');
-}
-function _onDragOver(e) {
+
+// ---- 觸控裝置拖曳支援（Pointer Events） ----
+let _ptrState = null;
+function _onPointerDown(e) {
+  if (e.pointerType === 'mouse') return;  // 桌面仍走 HTML5 DnD
+  const handle = e.currentTarget;
+  const row = handle.closest('.input-item-row');
+  if (!row) return;
   e.preventDefault();
-  const row = e.currentTarget;
+  _ptrState = {
+    srcIdx: Number(row.dataset.idx),
+    srcRow: row,
+    moved: false,
+    lastRow: null,
+    lastBefore: null,
+  };
+  row.classList.add('dragging');
+  handle.setPointerCapture(e.pointerId);
+  handle.onpointermove   = _onPointerMove;
+  handle.onpointerup     = _onPointerUp;
+  handle.onpointercancel = _onPointerUp;
+}
+function _onPointerMove(e) {
+  if (!_ptrState) return;
+  _ptrState.moved = true;
+  // 暫時隱藏 handle 的 pointer-events 以取得下方元素
+  const handle = e.currentTarget;
+  const prevPE = handle.style.pointerEvents;
+  handle.style.pointerEvents = 'none';
+  const below = document.elementFromPoint(e.clientX, e.clientY);
+  handle.style.pointerEvents = prevPE;
+  const row = below && below.closest ? below.closest('#inputGrid .input-item-row') : null;
+  document.querySelectorAll('#inputGrid .drop-above, #inputGrid .drop-below')
+    .forEach(el => el.classList.remove('drop-above', 'drop-below'));
+  if (!row || row === _ptrState.srcRow) {
+    _ptrState.lastRow = null;
+    return;
+  }
   const rect = row.getBoundingClientRect();
   const before = (e.clientY - rect.top) < rect.height / 2;
-  row.classList.remove('drag-over-top', 'drag-over-bottom');
-  row.classList.add(before ? 'drag-over-top' : 'drag-over-bottom');
+  row.classList.add(before ? 'drop-above' : 'drop-below');
+  _ptrState.lastRow = row;
+  _ptrState.lastBefore = before;
+}
+function _onPointerUp(e) {
+  const handle = e.currentTarget;
+  handle.onpointermove = null;
+  handle.onpointerup = null;
+  handle.onpointercancel = null;
+  try { handle.releasePointerCapture(e.pointerId); } catch(_){}
+  if (!_ptrState) return;
+  const { srcIdx, srcRow, lastRow, lastBefore } = _ptrState;
+  srcRow.classList.remove('dragging');
+  document.querySelectorAll('#inputGrid .drop-above, #inputGrid .drop-below')
+    .forEach(el => el.classList.remove('drop-above', 'drop-below'));
+  if (lastRow && lastRow !== srcRow) {
+    const tgt = Number(lastRow.dataset.idx);
+    _reorderRows(srcIdx, tgt, lastBefore);
+  }
+  _ptrState = null;
+}
+function _onDragStart(e) {
+  // e.currentTarget 是 handle；找到其所在 row
+  const handle = e.currentTarget;
+  const row = handle.closest('.input-item-row');
+  if (!row) return;
+  _dragSrcIdx = Number(row.dataset.idx);
+  _dragSrcRow = row;
+  try {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', String(_dragSrcIdx));
+    // 讓拖曳預覽顯示整列而非小小的 handle
+    if (e.dataTransfer.setDragImage) {
+      const rect = row.getBoundingClientRect();
+      e.dataTransfer.setDragImage(row, 20, rect.height / 2);
+    }
+  } catch(_){}
+  // 延遲加 class，避免 setDragImage 捕到半透明預覽
+  setTimeout(() => row.classList.add('dragging'), 0);
+}
+function _onDragOver(e) {
+  if (_dragSrcIdx == null) return;
+  e.preventDefault();
+  const row = e.currentTarget;
+  if (row === _dragSrcRow) return;  // 拖到自己身上不顯示指示線
+  const rect = row.getBoundingClientRect();
+  const before = (e.clientY - rect.top) < rect.height / 2;
+  // 清掉其他列的 drop 指示
+  document.querySelectorAll('#inputGrid .drop-above, #inputGrid .drop-below')
+    .forEach(el => el.classList.remove('drop-above', 'drop-below'));
+  row.classList.add(before ? 'drop-above' : 'drop-below');
   try { e.dataTransfer.dropEffect = 'move'; } catch(_){}
 }
 function _onDragLeave(e) {
-  e.currentTarget.classList.remove('drag-over-top', 'drag-over-bottom');
+  // 只在完全離開 row 才清除，避免子元素觸發造成閃爍
+  const row = e.currentTarget;
+  if (!row.contains(e.relatedTarget)) {
+    row.classList.remove('drop-above', 'drop-below');
+  }
 }
 function _onDrop(e) {
   e.preventDefault();
   const row = e.currentTarget;
   const rect = row.getBoundingClientRect();
   const before = (e.clientY - rect.top) < rect.height / 2;
-  row.classList.remove('drag-over-top', 'drag-over-bottom');
+  document.querySelectorAll('#inputGrid .drop-above, #inputGrid .drop-below')
+    .forEach(el => el.classList.remove('drop-above', 'drop-below'));
   const tgt = Number(row.dataset.idx);
   const src = _dragSrcIdx;
   if (src == null || src === tgt) return;
-  // 先保留 modal 內目前值，依當前顯示順序插入到目標位置
+  _reorderRows(src, tgt, before);
+}
+function _onDragEnd() {
+  _dragSrcIdx = null; _dragSrcRow = null;
+  document.querySelectorAll('#inputGrid .input-item-row')
+    .forEach(el => el.classList.remove('dragging', 'drop-above', 'drop-below'));
+}
+function _reorderRows(src, tgt, before) {
   const current = _collectModalItems();
+  if (src < 0 || src >= current.length) return;
   const [moved] = current.splice(src, 1);
   let insertAt = tgt > src ? tgt - 1 : tgt;
   if (!before) insertAt += 1;
@@ -3969,11 +4116,6 @@ function _onDrop(e) {
   portfolio = current;
   while (portfolio.length < portCount) portfolio.push(_emptyPortItem());
   _renderPortModalRows();
-}
-function _onDragEnd() {
-  _dragSrcIdx = null;
-  document.querySelectorAll('#inputGrid .input-item-row')
-    .forEach(el => el.classList.remove('dragging', 'drag-over-top', 'drag-over-bottom'));
 }
 
 function onPortSortChange() {
