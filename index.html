@@ -1416,6 +1416,101 @@ async function _ensureUser() {
   return _sbUser;
 }
 
+// ==================== CACHE HELPERS (Supabase) ====================
+// 公用 Supabase 快取層：先查表→命中即回，未命中再打外部 API 並回寫。
+// 出問題時可於 Console 執行 CACHE_CFG.enabled = false 臨時停用。
+const CACHE_CFG = {
+  enabled: true,
+  sources: {
+    twse: true, tpex: true, taifex: true, yf: true,
+    goodinfo: true, reddit: true, ptt: true, udn: true,
+    gnews: true, ndc: true, gtx: true,
+  },
+  // 各 source 的預設 TTL（秒）— 個別呼叫可覆寫
+  ttl: {
+    ndc:        24 * 3600,   // 景氣燈號：月更，可長快取
+    twse_day:   12 * 3600,   // TWSE 日級彙總
+    twse_rt:          60,    // TWSE 即時類
+    bfi82u:      6 * 3600,   // 三大法人大盤（收盤後固定）
+    t86:         6 * 3600,   // T86 個股法人（收盤後固定）
+    yf_hist:    12 * 3600,   // Yahoo K 線歷史
+    goodinfo:    6 * 3600,   // Goodinfo 個股摘要
+    news:            600,    // 新聞通用 10 分鐘
+    gtx:       30 * 86400,   // 翻譯幾乎不過期
+  },
+};
+
+// 取得資料：命中 cache 且未過期 → 回傳 payload；否則回 null
+async function cacheGet(source, endpoint) {
+  if (!CACHE_CFG.enabled || !CACHE_CFG.sources[source]) return null;
+  if (!_sb) return null;
+  try {
+    const { data, error } = await _sb
+      .from('api_cache')
+      .select('payload, expires_at')
+      .eq('source', source)
+      .eq('endpoint', endpoint)
+      .maybeSingle();
+    if (error || !data) return null;
+    if (data.expires_at && new Date(data.expires_at).getTime() < Date.now()) return null;
+    return data.payload;
+  } catch (_) { return null; }
+}
+
+// 寫回快取：僅登入者可寫（RLS 限制），未登入則 no-op
+async function cacheSet(source, endpoint, payload, ttlSeconds) {
+  if (!CACHE_CFG.enabled || !CACHE_CFG.sources[source]) return;
+  if (!_sb || !_sbUser) return;
+  try {
+    const ttl = Number(ttlSeconds) || 3600;
+    await _sb.from('api_cache').upsert({
+      source, endpoint, payload, ttl_seconds: ttl,
+      fetched_at: new Date().toISOString(),
+    }, { onConflict: 'source,endpoint' });
+  } catch (e) {
+    console.warn('[cacheSet]', source, endpoint, e?.message || e);
+  }
+}
+
+// 結構化表 upsert helper（供 business_cycle / stock_daily 等使用）
+async function tableUpsert(table, row, onConflict) {
+  if (!CACHE_CFG.enabled) return;
+  if (!_sb || !_sbUser) return;
+  try {
+    await _sb.from(table).upsert(row, onConflict ? { onConflict } : undefined);
+  } catch (e) {
+    console.warn('[tableUpsert]', table, e?.message || e);
+  }
+}
+
+// 結構化表讀取 helper（單列）— 例：tableGetOne('business_cycle', { month:'2026-04-01' })
+async function tableGetOne(table, filters) {
+  if (!CACHE_CFG.enabled) return null;
+  if (!_sb) return null;
+  try {
+    let q = _sb.from(table).select('*').limit(1);
+    for (const [k, v] of Object.entries(filters || {})) q = q.eq(k, v);
+    const { data, error } = await q.maybeSingle();
+    if (error) return null;
+    return data || null;
+  } catch (_) { return null; }
+}
+
+// 結構化表讀取 helper（多列）
+async function tableQuery(table, filters, { order, limit } = {}) {
+  if (!CACHE_CFG.enabled) return [];
+  if (!_sb) return [];
+  try {
+    let q = _sb.from(table).select('*');
+    for (const [k, v] of Object.entries(filters || {})) q = q.eq(k, v);
+    if (order) q = q.order(order.column, { ascending: !!order.ascending });
+    if (limit) q = q.limit(limit);
+    const { data, error } = await q;
+    if (error) return [];
+    return data || [];
+  } catch (_) { return []; }
+}
+
 // ==================== SYNC HELPERS ====================
 function setSyncIcon(state, title) {
   const el = id('syncIcon');
@@ -2047,6 +2142,22 @@ const TL_STATIC = { score: 40, month: '2026年2月', updated: '2026/03/31' };
 async function fetchTL() {
   const el = id('tlContent');
 
+  // ⓪ Supabase 結構化快取（business_cycle）— 月更新，快取命中率極高
+  try {
+    const rows = await tableQuery('business_cycle', {},
+      { order: { column: 'month', ascending: false }, limit: 1 });
+    if (rows?.length) {
+      const r0 = rows[0];
+      if (r0?.score) {
+        const monthStr = r0.month
+          ? new Date(r0.month).toLocaleDateString('zh-TW', { year: 'numeric', month: 'long' })
+          : '';
+        renderTL(el, +r0.score, monthStr);
+        return;
+      }
+    }
+  } catch (_) {}
+
   // ① 嘗試 NDC API（Cloudflare 已封鎖，通常直接失敗，保留以備日後恢復）
   for (const fetcher of [
     () => fetch('https://index.ndc.gov.tw/n/json/leading/zh-TW', { signal: AbortSignal.timeout(4000) }),
@@ -2061,13 +2172,35 @@ async function fetchTL() {
         const last = arr[arr.length - 1];
         const score = last.score ?? last.综合判断分数 ?? last.總分;
         const month = last.yearMonth || last.date || '';
-        if (score) { renderTL(el, +score, month); return; }
+        if (score) {
+          renderTL(el, +score, month);
+          // 回寫 business_cycle（month 標準化為該月第一日）
+          const monthDate = _parseYearMonthToFirstDay(month);
+          if (monthDate) {
+            tableUpsert('business_cycle', {
+              month: monthDate, score: +score, signal: null, raw: last,
+              fetched_at: new Date().toISOString(),
+            }, 'month');
+          }
+          return;
+        }
       }
     } catch (_) {}
   }
 
   // ② 靜態資料備援（維持最新正確數值，每月手動更新 TL_STATIC）
   renderTL(el, TL_STATIC.score, TL_STATIC.month, TL_STATIC.updated);
+}
+
+// 將 "2026年2月" / "2026-02" / "202602" 類字串解析成 "2026-02-01"，否則回 null
+function _parseYearMonthToFirstDay(s) {
+  if (!s) return null;
+  const t = String(s);
+  let y, m;
+  let mm = t.match(/(\d{4})\D*(\d{1,2})/);
+  if (mm) { y = +mm[1]; m = +mm[2]; }
+  if (!y || !m || m < 1 || m > 12) return null;
+  return `${y}-${String(m).padStart(2, '0')}-01`;
 }
 
 function renderTL(el, score, month, updated) {
@@ -2379,15 +2512,22 @@ async function fetchInstitutional() {
   if (!el) return;
 
   try {
+    // ⓪ 先嘗試從 Supabase api_cache 讀 BFI82U 原始回應
+    let d = await cacheGet('twse', 'BFI82U:day');
     // BFI82U has CORS — fetch directly (no proxy needed)
     const url = 'https://www.twse.com.tw/rwd/zh/fund/BFI82U?type=day&response=json';
-    let d;
-    try {
-      const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
-      d = JSON.parse(await r.text());
-    } catch (_) {
-      const r = await proxyFetch(url);
-      d = JSON.parse(await r.text());
+    if (!d) {
+      try {
+        const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+        d = JSON.parse(await r.text());
+      } catch (_) {
+        const r = await proxyFetch(url);
+        d = JSON.parse(await r.text());
+      }
+      // 寫回 api_cache（收盤後快取 6h，盤中快取 5m）
+      if (d?.data?.length) {
+        cacheSet('twse', 'BFI82U:day', d, CACHE_CFG.ttl.bfi82u);
+      }
     }
     const rows = d.data || [];
     if (!rows.length) throw new Error('BFI82U empty');
@@ -2419,6 +2559,22 @@ async function fetchInstitutional() {
     const totalFound = Object.keys(rowMap).length;
     if (!totalFound) throw new Error('no matching rows');
 
+    // 寫回結構化表 three_institutionals（依解析後的日期與三大投資人分別 upsert）
+    if (d.date && /^\d{8}$/.test(d.date)) {
+      const tradeDate = `${d.date.slice(0,4)}-${d.date.slice(4,6)}-${d.date.slice(6,8)}`;
+      ['外資', '投信', '自營商'].forEach(inv => {
+        if (inv in rowMap) {
+          tableUpsert('three_institutionals', {
+            trade_date: tradeDate,
+            investor:   inv,
+            net_amount: rowMap[inv],
+            raw:        { source: 'BFI82U', date: d.date },
+            updated_at: new Date().toISOString(),
+          }, 'trade_date,investor');
+        }
+      });
+    }
+
     const ORDER = ['外資', '投信', '自營商', '三大合計'];
     let html = `<div class="inst-hd"><i class="fa-solid fa-building-columns" style="color:var(--warn)"></i> 三大法人買賣超（億元）${date ? `<span style="font-weight:400;color:var(--text3);margin-left:.5rem">${date}</span>` : ''}</div>`;
     ORDER.forEach(label => {
@@ -2436,14 +2592,17 @@ async function fetchInstitutional() {
 
     // 大盤成交值 — FMTQIK 有 CORS，直接取；欄位格式：[日期,成交股數,成交金額,成交筆數,發行量,漲跌]
     try {
+      let d2 = await cacheGet('twse', 'FMTQIK');
       const fmUrl = 'https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?response=json';
-      let d2;
-      try {
-        const r2 = await fetch(fmUrl, { signal: AbortSignal.timeout(8000) });
-        d2 = JSON.parse(await r2.text());
-      } catch (_) {
-        const r2 = await proxyFetch(fmUrl);
-        d2 = JSON.parse(await r2.text());
+      if (!d2) {
+        try {
+          const r2 = await fetch(fmUrl, { signal: AbortSignal.timeout(8000) });
+          d2 = JSON.parse(await r2.text());
+        } catch (_) {
+          const r2 = await proxyFetch(fmUrl);
+          d2 = JSON.parse(await r2.text());
+        }
+        if (d2?.data?.length) cacheSet('twse', 'FMTQIK', d2, CACHE_CFG.ttl.twse_day);
       }
       const rows2 = d2.data || [];
       if (rows2.length) {
@@ -3560,6 +3719,11 @@ const REC_UNIVERSE = [
 ];
 
 async function _yfHistory(code) {
+  // ⓪ 先查 api_cache（完整 1y 時序；雖占空間但推薦個股演算需要完整陣列）
+  const cacheKey = `yfChart:${code}:1y:1d`;
+  const cached = await cacheGet('yf', cacheKey);
+  if (cached && Array.isArray(cached)) return cached;
+
   const sym = code + '.TW';
   const url = CFG.yfChart + encodeURIComponent(sym) + '?interval=1d&range=1y';
   try {
@@ -3568,10 +3732,46 @@ async function _yfHistory(code) {
     const res = j?.chart?.result?.[0];
     const closes = res?.indicators?.quote?.[0]?.close || [];
     const vols   = res?.indicators?.quote?.[0]?.volume || [];
-    return closes
+    const arr = closes
       .map((c, i) => ({ c, v: vols[i] || 0 }))
       .filter(x => x.c != null);
+    if (arr.length > 30) cacheSet('yf', cacheKey, arr, CACHE_CFG.ttl.yf_hist);
+    // 順便把最後一日寫入 stock_daily 表（非同步）
+    _writeYfLastToStockDaily(code, res).catch(() => {});
+    return arr;
   } catch (_) { return []; }
+}
+
+// 把 Yahoo chart 回傳的「最後一日」寫入 stock_daily 結構化表
+async function _writeYfLastToStockDaily(code, chartResult) {
+  if (!_sb || !_sbUser || !chartResult) return;
+  try {
+    const ts  = chartResult.timestamp || [];
+    const q   = chartResult.indicators?.quote?.[0] || {};
+    const n   = ts.length;
+    if (!n) return;
+    const lastIdx = n - 1;
+    const closeV  = q.close?.[lastIdx];
+    if (closeV == null) return;
+    const dt = new Date(ts[lastIdx] * 1000);
+    const dateStr = dt.toISOString().slice(0, 10);  // YYYY-MM-DD
+    const prevClose = lastIdx > 0 ? q.close?.[lastIdx - 1] : null;
+    const changeV = prevClose ? (closeV - prevClose) : null;
+    const pctV    = prevClose ? ((closeV - prevClose) / prevClose * 100) : null;
+    await _sb.from('stock_daily').upsert({
+      trade_date: dateStr,
+      stock_code: code,
+      open:  q.open?.[lastIdx]  ?? null,
+      high:  q.high?.[lastIdx]  ?? null,
+      low:   q.low?.[lastIdx]   ?? null,
+      close: closeV,
+      volume: q.volume?.[lastIdx] ?? null,
+      change: changeV,
+      change_pct: pctV,
+      source: 'yf',
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'trade_date,stock_code' });
+  } catch (e) { console.warn('[stock_daily upsert]', e?.message || e); }
 }
 
 function _maClose(arr, n) {
@@ -3581,15 +3781,60 @@ function _maClose(arr, n) {
 }
 
 async function _fetchT86(yyyymmdd) {
+  // ⓪ 先查 api_cache（T86 每日固定，歷史資料快取可永久有效）
+  const cacheKey = `T86:${yyyymmdd}`;
+  const cached = await cacheGet('twse', cacheKey);
+  if (cached) return cached;
+
   const url = `https://www.twse.com.tw/rwd/zh/fund/T86?date=${yyyymmdd}&selectType=ALL&response=json`;
+  let json = null;
   try {
     const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (r.ok) return await r.json();
+    if (r.ok) json = await r.json();
   } catch (_) {}
+  if (!json) {
+    try {
+      const r = await proxyFetch(url);
+      json = await r.json();
+    } catch (_) { return null; }
+  }
+  // 成功取得 → 寫回 api_cache
+  if (json?.data?.length) {
+    cacheSet('twse', cacheKey, json, CACHE_CFG.ttl.t86);
+    // 同時批次寫入 institutional_flow 結構化表（非同步，不等）
+    _writeT86ToInstitutionalFlow(yyyymmdd, json).catch(() => {});
+  }
+  return json;
+}
+
+// 批次把 T86 json 寫入 institutional_flow 表（僅 REC_UNIVERSE 中的代號，避免上千筆寫入）
+async function _writeT86ToInstitutionalFlow(yyyymmdd, json) {
+  if (!_sb || !_sbUser) return;
+  if (!yyyymmdd || yyyymmdd.length !== 8) return;
+  const rows = json?.data || json?.aaData || [];
+  if (!Array.isArray(rows) || !rows.length) return;
+  const tradeDate = `${yyyymmdd.slice(0,4)}-${yyyymmdd.slice(4,6)}-${yyyymmdd.slice(6,8)}`;
+  const toNum = s => parseFloat(String(s || '0').replace(/,/g, '')) || 0;
+  // 只寫入 REC_UNIVERSE 中的代號，降低寫入量
+  const universeCodes = new Set((typeof REC_UNIVERSE !== 'undefined' ? REC_UNIVERSE : []).map(s => s.code));
+  const payload = [];
+  rows.forEach(row => {
+    const code = String(row[0] || '').trim();
+    if (!/^\d{4}$/.test(code)) return;
+    if (!universeCodes.has(code)) return;
+    payload.push({
+      trade_date:  tradeDate,
+      stock_code:  code,
+      foreign_net: toNum(row[4]),
+      trust_net:   toNum(row[10]),
+      dealer_net:  toNum(row[11]),
+      updated_at:  new Date().toISOString(),
+    });
+  });
+  if (!payload.length) return;
   try {
-    const r = await proxyFetch(url);
-    return await r.json();
-  } catch (_) { return null; }
+    await _sb.from('institutional_flow').upsert(payload, { onConflict: 'trade_date,stock_code' });
+  } catch (e) { console.warn('[institutional_flow upsert]', e?.message || e); }
 }
 
 async function _get3DayT86() {
@@ -3660,6 +3905,24 @@ async function _fetchGoodinfo(url) {
 // 從 Goodinfo 個股頁抓行情 + 本益比 + 殖利率 + 漲跌
 async function _giStockSummary(code) {
   const url  = `https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID=${code}`;
+
+  // ⓪ 先查 stock_fundamentals 結構化表（TTL 6h）
+  try {
+    const row = await tableGetOne('stock_fundamentals', { stock_code: code });
+    if (row?.fetched_at) {
+      const ageMs = Date.now() - new Date(row.fetched_at).getTime();
+      if (ageMs < CACHE_CFG.ttl.goodinfo * 1000) {
+        return {
+          price:  row.last_price,
+          chgPct: row.last_change_pct,
+          pe:     row.pe,
+          yld:    row.dividend_yield,
+          url:    row.source_url || url,
+        };
+      }
+    }
+  } catch (_) {}
+
   const html = await _fetchGoodinfo(url);
   if (!html) return null;
   const clean = html.replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ');
@@ -3667,13 +3930,26 @@ async function _giStockSummary(code) {
     const m = clean.match(re);
     return m ? parseFloat(m[1].replace(/,/g, '')) : null;
   };
-  return {
+  const result = {
     price:  pickNum(/成交\s+([\d.]+)/),
     chgPct: pickNum(/漲跌幅\s+([+\-−]?[\d.]+)\s*%/),
     pe:     pickNum(/本益比\s+([\d.]+)/),
     yld:    pickNum(/現金殖利率\s+([\d.]+)\s*%/) || pickNum(/殖利率\s+([\d.]+)\s*%/),
     url,
   };
+  // 寫回 stock_fundamentals（非同步，不等）
+  if (result.price != null || result.pe != null || result.yld != null) {
+    tableUpsert('stock_fundamentals', {
+      stock_code:       code,
+      pe:               result.pe,
+      dividend_yield:   result.yld,
+      last_price:       result.price,
+      last_change_pct:  result.chgPct,
+      source_url:       url,
+      fetched_at:       new Date().toISOString(),
+    }, 'stock_code');
+  }
+  return result;
 }
 
 // ---- 每日歷史紀錄（以 smtm_rec_hist 作為唯一資料表）----
@@ -3689,6 +3965,44 @@ function _writeRecHist(hist) {
   const trimmed = {};
   keys.forEach(k => trimmed[k] = hist[k]);
   try { localStorage.setItem('smtm_rec_hist', JSON.stringify(trimmed)); } catch (_) {}
+}
+
+// 從 Supabase recommendation_snapshots 拉最近 60 天，合併到 localStorage 後回傳
+async function _loadRecHistAsync() {
+  const local = _loadRecHist();
+  if (!_sb || !CACHE_CFG.enabled) return local;
+  try {
+    const rows = await tableQuery('recommendation_snapshots', {},
+      { order: { column: 'trade_date', ascending: false }, limit: 60 });
+    if (!rows?.length) return local;
+    rows.forEach(r => {
+      const key = r.trade_date;  // 'YYYY-MM-DD'
+      if (!key) return;
+      // 雲端版本若不存在或本地缺失，採用雲端
+      if (!local[key]) {
+        local[key] = {
+          ts:    r.generated_at ? new Date(r.generated_at).getTime() : Date.now(),
+          picks: r.picks || [],
+        };
+      }
+    });
+    // 寫回 localStorage 讓後續同步呼叫能用到
+    _writeRecHist(local);
+  } catch (e) { console.warn('[recommendation_snapshots load]', e?.message || e); }
+  return local;
+}
+
+// 把當日 entry 寫入 recommendation_snapshots（非同步，不等）
+async function _writeRecSnapshot(dateKey, entry) {
+  if (!_sb || !_sbUser || !CACHE_CFG.enabled) return;
+  if (!dateKey || !entry?.picks?.length) return;
+  try {
+    await _sb.from('recommendation_snapshots').upsert({
+      trade_date:   dateKey,
+      picks:        entry.picks,
+      generated_at: entry.ts ? new Date(entry.ts).toISOString() : new Date().toISOString(),
+    }, { onConflict: 'trade_date' });
+  } catch (e) { console.warn('[recommendation_snapshots upsert]', e?.message || e); }
 }
 
 // 最近一個交易日 key（YYYY-MM-DD）
@@ -3724,7 +4038,10 @@ async function _patchZeroPrices(entry, dateKey) {
   }));
   if (patched) {
     const hist = _loadRecHist();
-    if (dateKey) hist[dateKey] = entry;
+    if (dateKey) {
+      hist[dateKey] = entry;
+      _writeRecSnapshot(dateKey, entry);
+    }
     _writeRecHist(hist);
   }
   return patched;
@@ -3910,12 +4227,21 @@ async function fetchRecStocks() {
   if (!el) return;
 
   // ① 先從資料表讀最新一筆並立即渲染（避免卡「載入中」）
+  //    同時非同步合併雲端 recommendation_snapshots
   const hist = _loadRecHist();
   const existingKeys = Object.keys(hist).sort().reverse();
   if (existingKeys.length) {
     _renderRecPicks(hist[existingKeys[0]], existingKeys[0]);
   }
   _renderRecHistory();
+  // 背景：合併雲端 snapshots，完成後重繪歷史
+  _loadRecHistAsync().then(merged => {
+    const newKeys = Object.keys(merged).sort().reverse();
+    if (newKeys.length && newKeys[0] !== existingKeys[0]) {
+      _renderRecPicks(merged[newKeys[0]], newKeys[0]);
+    }
+    _renderRecHistory();
+  });
 
   // ② 若最近交易日已有紀錄且全數有效股價 → 不再重新計算
   const lastKey = _lastTradingDayKey();
@@ -3938,6 +4264,7 @@ async function fetchRecStocks() {
     const entry = { ts: Date.now(), picks };
     hist[lastKey] = entry;
     _writeRecHist(hist);
+    _writeRecSnapshot(lastKey, entry);
     _renderRecPicks(entry, lastKey);
     _renderRecHistory();
   } catch (e) {
